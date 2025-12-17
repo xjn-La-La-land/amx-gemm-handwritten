@@ -27,6 +27,8 @@ public:
         parse_args(argc, argv);
         if (disable_hwpf) 
             HWPFCtrl::disable_prefetchers(thread_params.core_list);
+        else
+            HWPFCtrl::enable_prefetchers(thread_params.core_list);
         report_params();
     }
     
@@ -121,7 +123,7 @@ private:
     void report_params() {
         std::cout << LINE;
         std::cout << "Running AMX int8 GEMM Performance Test on " << thread_params.core_list.size() << " CPU Cores, "
-                  << "at " << std::setprecision(2) << frequency_hz / 1e9 << " GHz!\n";
+                  << "at " << std::fixed << std::setprecision(2) << frequency_hz / 1e9 << " GHz!\n";
         std::cout << "Matrix Layout: A - " << (gemm_params.packA ? "packed" : "normal") << ", "
                   << "B - " << (gemm_params.packB ? "packed" : "normal") << ", "
                   << "C - " << (gemm_params.packC ? "packed" : "normal") << "\n";
@@ -130,9 +132,13 @@ private:
                   << ", TK=" << amx::GEMMKernelInt8::TK << "\n";
         std::cout << "Prefetch Options:\n";
         std::cout << "  Hardware Prefetchers: " << (disable_hwpf ? "Off" : "On") << "\n";
-        std::cout << "  Software Prefetch A: " << (gemm_params.swpfA ? "On" : "Off") << "\n";
-        std::cout << "  Software Prefetch B: " << (gemm_params.swpfB ? "On" : "Off") << "\n";
-        std::cout << "  Software Prefetch C: " << (gemm_params.swpfC ? "On" : "Off") << "\n";
+        if (gemm_params.packA && gemm_params.swpfA) {
+            std::cout << "  Software Prefetch A: " << (gemm_params.swpfA ? "On" : "Off") << "\n";
+            std::cout << "  Software Prefetch B: " << (gemm_params.swpfB ? "On" : "Off") << "\n";
+            std::cout << "  Software Prefetch C: " << (gemm_params.swpfC ? "On" : "Off") << "\n";
+        } else {
+            std::cout << "  Software Prefetch: Off\n";
+        }
         std::cout << LINE;
         print_header();
     }
@@ -203,8 +209,8 @@ int main(int argc, char** argv) {
 
     for (int i = 512; i <= 8192; i += 256) {
         // int m = ROUNDUP(i, TM);
-        int m = 512;
-        int n = i;
+        int m = i;
+        int n = 512;
         int k = 1280;
         tester.run_test(m, n, k);
     }

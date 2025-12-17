@@ -220,6 +220,15 @@ private:
 
     // L1 Cache Operations (Tile Load / Store)
 
+    #define load_tileA_l1(dst, a_base, r, c, lda) \
+        _tile_loadd(dst, &a_base[OFFSET2D(r, c, lda)], lda * sizeof(int8_t))
+    #define load_tileB_l1(dst, b_base, r, c, ldb) \
+        _tile_loadd(dst, &b_base[OFFSET2D(r/KPACK_b8, c*KPACK_b8, ldb*KPACK_b8)], ldb * KPACK_b8 * sizeof(int8_t))
+    #define load_tileC_l1(dst, c_base, r, c, ldc) \
+        _tile_loadd(dst, &c_base[OFFSET2D(r, c, ldc)], ldc * sizeof(int32_t))
+    #define store_tileC_l1(src, c_base, r, c, ldc) \
+        _tile_stored(src, &c_base[OFFSET2D(r, c, ldc)], ldc * sizeof(int32_t))
+
     // tileloadd A0 and A1
     static ALWAYS_INLINE void load_2_tileA_l1(const int8_t* a, int lda) {
         _tile_loadd(A0, a, lda * sizeof(int8_t));                  // Load A0
@@ -232,8 +241,8 @@ private:
     }
     // tileloadd B0 and B1
     static ALWAYS_INLINE void load_2_tileB_l1(const int8_t* b, int ldb) {
-        _tile_loadd(B0, b, ldb * sizeof(int8_t));                  // Load B0
-        _tile_loadd(B1, b + MAX_ROWS * ldb, ldb * sizeof(int8_t)); // Load B1
+        _tile_loadd(B0, b, ldb * sizeof(int8_t));               // Load B0
+        _tile_loadd(B1, b + MAX_COLS_i8, ldb * sizeof(int8_t)); // Load B1
     }
     // dense tileloadd B0 and B1(for packed B)
     static ALWAYS_INLINE void load_2_tileB_l1(const int8_t* b) {
@@ -243,9 +252,9 @@ private:
     // tileloadd C0,C1,C2,C3
     static ALWAYS_INLINE void load_4_tileC_l1(const int32_t* c, int ldc) {
         _tile_loadd(C00, c, ldc * sizeof(int32_t));                         // Load C0
-        _tile_loadd(C01, c + MAX_ROWS, ldc * sizeof(int32_t));              // Load C1
+        _tile_loadd(C01, c + MAX_COLS_i32, ldc * sizeof(int32_t));          // Load C1
         _tile_loadd(C10, c + MAX_ROWS * ldc, ldc * sizeof(int32_t));        // Load C2
-        _tile_loadd(C11, c + MAX_ROWS * ldc + MAX_ROWS, ldc * sizeof(int32_t)); // Load C3
+        _tile_loadd(C11, c + MAX_ROWS * ldc + MAX_COLS_i32, ldc * sizeof(int32_t)); // Load C3
     }
     // dense tileloadd C0,C1,C2,C3(for packed C)
     static ALWAYS_INLINE void load_4_tileC_l1(const int32_t* c) {
@@ -257,9 +266,9 @@ private:
     // tilestored C0,C1,C2,C3
     static ALWAYS_INLINE void store_4_tileC_l1(int32_t* c, int ldc) {
         _tile_stored(C00, c, ldc * sizeof(int32_t));                         // Store C0
-        _tile_stored(C01, c + MAX_ROWS, ldc * sizeof(int32_t));              // Store C1
+        _tile_stored(C01, c + MAX_COLS_i32, ldc * sizeof(int32_t));          // Store C1
         _tile_stored(C10, c + MAX_ROWS * ldc, ldc * sizeof(int32_t));        // Store C2
-        _tile_stored(C11, c + MAX_ROWS * ldc + MAX_ROWS, ldc * sizeof(int32_t)); // Store C3
+        _tile_stored(C11, c + MAX_ROWS * ldc + MAX_COLS_i32, ldc * sizeof(int32_t)); // Store C3
     }
     // dense tilestored C0,C1,C2,C3(for packed C)
     static ALWAYS_INLINE void store_4_tileC_l1(int32_t* c) {
@@ -271,6 +280,13 @@ private:
 
 
     // L2 Cache Operations (Tile Load / Store)
+
+    #define load_tileA_l2(dst, a_base, r, c, lda) \
+        _tile_stream_loadd(dst, &a_base[OFFSET2D(r, c, lda)], lda * sizeof(int8_t))
+    #define load_tileB_l2(dst, b_base, r, c, ldb) \
+        _tile_stream_loadd(dst, &b_base[OFFSET2D(r/KPACK_b8, c*KPACK_b8, ldb*KPACK_b8)], ldb * KPACK_b8 * sizeof(int8_t))
+    #define load_tileC_l2(dst, c_base, r, c, ldc) \
+        _tile_stream_loadd(dst, &c_base[OFFSET2D(r, c, ldc)], ldc * sizeof(int32_t))
 
     // tileloaddt1 A0 and A1
     static ALWAYS_INLINE void load_2_tileA_l2(const int8_t* a, int lda) {
@@ -284,8 +300,8 @@ private:
     }
     // tileloaddt1 B0 and B1
     static ALWAYS_INLINE void load_2_tileB_l2(const int8_t* b, int ldb) {
-        _tile_stream_loadd(B0, b, ldb * sizeof(int8_t));                  // Load B0
-        _tile_stream_loadd(B1, b + MAX_ROWS * ldb, ldb * sizeof(int8_t)); // Load B1
+        _tile_stream_loadd(B0, b, ldb * sizeof(int8_t));               // Load B0
+        _tile_stream_loadd(B1, b + MAX_COLS_i8, ldb * sizeof(int8_t)); // Load B1
     }
     // dense tileloaddt1 B0 and B1(for packed B)
     static ALWAYS_INLINE void load_2_tileB_l2(const int8_t* b) {
@@ -295,9 +311,9 @@ private:
     // tileloaddt1 C0,C1,C2,C3
     static ALWAYS_INLINE void load_4_tileC_l2(const int32_t* c, int ldc) {
         _tile_stream_loadd(C00, c, ldc * sizeof(int32_t));                     // Load C0
-        _tile_stream_loadd(C01, c + MAX_ROWS, ldc * sizeof(int32_t));          // Load C1
+        _tile_stream_loadd(C01, c + MAX_COLS_i32, ldc * sizeof(int32_t));      // Load C1
         _tile_stream_loadd(C10, c + MAX_ROWS * ldc, ldc * sizeof(int32_t));    // Load C2
-        _tile_stream_loadd(C11, c + MAX_ROWS * ldc + MAX_ROWS, ldc * sizeof(int32_t)); // Load C3
+        _tile_stream_loadd(C11, c + MAX_ROWS * ldc + MAX_COLS_i32, ldc * sizeof(int32_t)); // Load C3
     }
     // dense tileloaddt1 C0,C1,C2,C3(for packed C)
     static ALWAYS_INLINE void load_4_tileC_l2(const int32_t* c) {
@@ -385,10 +401,14 @@ private:
         const int M, N, K;
     };
 
-    taskSize full_task{
-        .A = A, .B = B, .C = C,
-        .M = M, .N = N, .K = K,
-    };
+    taskSize get_full_task() {
+        return taskSize{
+            params.packA ? bufferA.get() : A,
+            params.packB ? bufferB.get() : B,
+            params.packC ? bufferC.get() : C,
+            M, N, K
+        };
+    }
 
     // compute kernel
     void amx_gemm_naive(taskSize *task = nullptr);

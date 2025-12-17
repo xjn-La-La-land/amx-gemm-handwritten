@@ -206,9 +206,9 @@ void Kernel::cpu_gemm_ref() {
 
 // dummy amx implementation
 void Kernel::amx_gemm_naive(taskSize *task) {
-    if (task == nullptr) {
-        task = &full_task;
-    }
+    auto full_task = get_full_task();
+    if (task == nullptr) task = &full_task;
+
     for (int i = 0; i < task->M; i += MAX_ROWS) {
         for (int j = 0; j < task->N; j += MAX_ROWS) {
             _tile_stream_loadd(0, &task->C[OFFSET2D(i, j, ldc)], ldc * sizeof(int32_t));
@@ -231,16 +231,20 @@ void Kernel::amx_gemm_naive(taskSize *task) {
 /// 
 /// @param task Configuration for the current matrix block.
 void Kernel::amx_gemm_core(taskSize *task) {
-    if (task == nullptr) {
-        task = &full_task;
-    }
+    auto full_task = get_full_task();
+    if (task == nullptr) task = &full_task;
+
     for (int i = 0; i < task->M; i += M_STEP) {
         for (int j = 0; j < task->N; j += N_STEP) {
             load_4_tileC_l2(&task->C[OFFSET2D(i, j, ldc)], ldc);
             #pragma GCC unroll 20 // GEMM core loop, TK / K_STEP = 20
             for (int k = 0; k < task->K; k += K_STEP) {
-                load_2_tileA_l1(&task->A[OFFSET2D(i, k, lda)], lda);
-                load_2_tileB_l2(&task->B[OFFSET2D(k, j, ldb)], ldb);
+                // load_2_tileA_l1(&task->A[OFFSET2D(i, k, lda)], lda);
+                // load_2_tileB_l2(&task->B[OFFSET2D(k, j, ldb)], ldb);
+                load_tileB_l2(B0, task->B, k, j, ldb);
+                load_tileA_l1(A0, task->A, i, k, lda);
+                load_tileB_l2(B1, task->B, k, j + MAX_ROWS, ldb);
+                load_tileA_l1(A1, task->A, i + MAX_ROWS, k, lda);
                 run_4_tdp();
             }
             store_4_tileC_l1(&task->C[OFFSET2D(i, j, ldc)], ldc);
@@ -257,9 +261,8 @@ void Kernel::amx_gemm_core(taskSize *task) {
 /// 
 /// @param task Configuration for the current matrix block.
 void Kernel::amx_gemm_core_packB(taskSize *task) {
-    if (task == nullptr) {
-        task = &full_task;
-    }
+    auto full_task = get_full_task();
+    if (task == nullptr) task = &full_task;
 
     const int8_t *B_ptr;
     for (int i = 0; i < task->M; i += M_STEP) {
@@ -281,10 +284,6 @@ void Kernel::amx_gemm_core_packB(taskSize *task) {
 
 template <bool SWPF_A, bool SWPF_B, bool SWPF_C>
 void Kernel::amx_gemm_core_packAB_v1_template(taskSize *task) {
-    if (task == nullptr) {
-        task = &full_task;
-    }
-
     const int8_t *A_ptr, *B_ptr;
 
     using FetcherA_t = std::conditional_t<SWPF_A, SWPFetcher, NoOpFetcher>;
@@ -319,11 +318,15 @@ void Kernel::amx_gemm_core_packAB_v1_template(taskSize *task) {
             }
             #pragma GCC unroll 20 // GEMM core loop, TK / K_STEP = 20
             for (int k = 0; k < task->K; k += K_STEP) {
-                load_2_tileA_l1(A_ptr);
-                load_2_tileB_l2(B_ptr);
+                _tile_stream_loadd(6, B_ptr, MIN_STRIDE);
+                B_ptr += TILE_SIZE_i8; // tileload B0
+                _tile_stream_loadd(7, B_ptr, MIN_STRIDE);
+                B_ptr += TILE_SIZE_i8; // tileload B1
+                _tile_loadd(4, A_ptr, MIN_STRIDE);
+                A_ptr += TILE_SIZE_i8; // tileload A0
+                _tile_loadd(5, A_ptr, MIN_STRIDE);
+                A_ptr += TILE_SIZE_i8; // tileload A1
                 run_4_tdp();
-                A_ptr += 2 * TILE_SIZE_i8;
-                B_ptr += 2 * TILE_SIZE_i8;
 
                 if constexpr (SWPF_A) swpfetcher_A.prefetch();
                 if constexpr (SWPF_B) swpfetcher_B.prefetch();
@@ -348,6 +351,9 @@ void Kernel::amx_gemm_core_packAB_v1_template(taskSize *task) {
 /// 
 /// @param task Configuration for the current matrix block.
 void Kernel::amx_gemm_core_packAB_v1(taskSize *task) {
+    auto full_task = get_full_task();
+    if (task == nullptr) task = &full_task;
+
     int swpf_choice = params.swpfA << 2 | params.swpfB << 1 | params.swpfC;
     switch (swpf_choice) {
         case 0b000:
@@ -370,10 +376,6 @@ void Kernel::amx_gemm_core_packAB_v1(taskSize *task) {
 
 template <bool SWPF_A, bool SWPF_B, bool SWPF_C>
 void Kernel::amx_gemm_core_packAB_v2_template(taskSize *task) {
-    if (task == nullptr) {
-        task = &full_task;
-    }
-
     const int8_t *A_ptr, *B_ptr;
 
     using FetcherA_t = std::conditional_t<SWPF_A, SWPFetcher, NoOpFetcher>;
@@ -408,11 +410,15 @@ void Kernel::amx_gemm_core_packAB_v2_template(taskSize *task) {
             }
             #pragma GCC unroll 20 // GEMM core loop, TK / K_STEP = 20
             for (int k = 0; k < task->K; k += K_STEP) {
-                load_2_tileA_l2(A_ptr);
-                load_2_tileB_l1(B_ptr);
+                _tile_stream_loadd(6, B_ptr, MIN_STRIDE);
+                B_ptr += TILE_SIZE_i8; // tileload B0
+                _tile_stream_loadd(7, B_ptr, MIN_STRIDE);
+                B_ptr += TILE_SIZE_i8; // tileload B1
+                _tile_loadd(4, A_ptr, MIN_STRIDE);
+                A_ptr += TILE_SIZE_i8; // tileload A0
+                _tile_loadd(5, A_ptr, MIN_STRIDE);
+                A_ptr += TILE_SIZE_i8; // tileload A1
                 run_4_tdp();
-                A_ptr += 2 * TILE_SIZE_i8;
-                B_ptr += 2 * TILE_SIZE_i8;
 
                 if constexpr (SWPF_B) swpfetcher_B.prefetch();
                 if constexpr (SWPF_A) swpfetcher_A.prefetch();
@@ -437,6 +443,9 @@ void Kernel::amx_gemm_core_packAB_v2_template(taskSize *task) {
 /// 
 /// @param task Configuration for the current matrix block.
 void Kernel::amx_gemm_core_packAB_v2(taskSize *task) {
+    auto full_task = get_full_task();
+    if (task == nullptr) task = &full_task;
+
     int swpf_choice = params.swpfA << 2 | params.swpfB << 1 | params.swpfC;
     switch (swpf_choice) {
         case 0b000:
@@ -459,10 +468,6 @@ void Kernel::amx_gemm_core_packAB_v2(taskSize *task) {
 
 template <bool SWPF_A, bool SWPF_B, bool SWPF_C>
 void Kernel::amx_gemm_core_packABC_v1_template(taskSize *task) {
-    if (task == nullptr) {
-        task = &full_task;
-    }
-
     const int8_t *A_ptr, *B_ptr;
     int32_t *C_ptr = task->C;
 
@@ -526,6 +531,9 @@ void Kernel::amx_gemm_core_packABC_v1_template(taskSize *task) {
 /// 
 /// @param task Configuration for the current matrix block.
 void Kernel::amx_gemm_core_packABC_v1(taskSize *task) {
+    auto full_task = get_full_task();
+    if (task == nullptr) task = &full_task;
+
     int swpf_choice = params.swpfA << 2 | params.swpfB << 1 | params.swpfC;
     switch (swpf_choice) {
         case 0b000:
@@ -549,10 +557,6 @@ void Kernel::amx_gemm_core_packABC_v1(taskSize *task) {
 
 template <bool SWPF_A, bool SWPF_B, bool SWPF_C>
 void Kernel::amx_gemm_core_packABC_v2_template(taskSize *task) {
-    if (task == nullptr) {
-        task = &full_task;
-    }
-
     const int8_t *A_ptr, *B_ptr;
     int32_t *C_ptr = task->C;
 
@@ -616,6 +620,9 @@ void Kernel::amx_gemm_core_packABC_v2_template(taskSize *task) {
 /// 
 /// @param task Configuration for the current matrix block.
 void Kernel::amx_gemm_core_packABC_v2(taskSize *task) {
+    auto full_task = get_full_task();
+    if (task == nullptr) task = &full_task;
+
     int swpf_choice = params.swpfA << 2 | params.swpfB << 1 | params.swpfC;
     switch (swpf_choice) {
         case 0b000:
@@ -638,23 +645,22 @@ void Kernel::amx_gemm_core_packABC_v2(taskSize *task) {
 
 /// @brief AMX GEMM L2 blocking wrapper, computes the entire MxN matrix block
 void Kernel::amx_gemm_blocking() {
+    void (Kernel::*gemm_core)(taskSize *task) = nullptr;
+    // select gemm core based on packing options
+    if (params.packA && params.packB && params.packC) {
+        gemm_core = (M >= N) ? 
+            &Kernel::amx_gemm_core_packABC_v1 : &Kernel::amx_gemm_core_packABC_v2;
+    } else if (params.packA && params.packB) {
+        gemm_core = (M >= N) ? 
+            &Kernel::amx_gemm_core_packAB_v1 : &Kernel::amx_gemm_core_packAB_v2;
+    }
+    else if (params.packB) {
+        gemm_core = &Kernel::amx_gemm_core_packB;
+    }
+    else {
+        gemm_core = &Kernel::amx_gemm_core;
+    }
     for (int tk = 0; tk < K; tk += TK) {
-        void (Kernel::*gemm_core)(taskSize *task) = nullptr;
-        // select gemm core based on packing options
-        if (params.packA && params.packB && params.packC) {
-            gemm_core = (M >= N) ? 
-                &Kernel::amx_gemm_core_packABC_v1 : &Kernel::amx_gemm_core_packABC_v2;
-        } else if (params.packA && params.packB) {
-            gemm_core = (M >= N) ? 
-                &Kernel::amx_gemm_core_packAB_v1 : &Kernel::amx_gemm_core_packAB_v2;
-        }
-        else if (params.packB) {
-            gemm_core = &Kernel::amx_gemm_core_packB;
-        }
-        else {
-            gemm_core = &Kernel::amx_gemm_core;
-        }
-
         if (M >= N) {
             for (int tn = 0; tn < N; tn += TN) {
                 taskSize task = {
@@ -688,7 +694,6 @@ void Kernel::amx_gemm_blocking() {
 
 void Kernel::amx_gemm_compute() {
     amx_gemm_blocking(); // launch AMX GEMM with L2 blocking
-    // amx_gemm_core_packABC_v2();
 }
 
 

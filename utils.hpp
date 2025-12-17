@@ -39,7 +39,7 @@ namespace MSR {
     constexpr uint64_t DISABLE_DCU_IP       = (1ULL << 3);
     
     // 默认禁用的配置 (根据你的需求调整)
-    constexpr uint64_t DEFAULT_DISABLE_MASK = DISABLE_L2 | DISABLE_L2_ADJACENT;
+    constexpr uint64_t DEFAULT_DISABLE_MASK = DISABLE_L2 | DISABLE_L2_ADJACENT | DISABLE_DCU | DISABLE_DCU_IP;
 }
 
 class FileDescriptor {

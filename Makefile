@@ -67,7 +67,7 @@ export KMP_AFFINITY=compact,1,0,granularity=fine
 # 测每核/进程的 L1/L2/L3 命中与 miss（进程级）
 PERFFLAGS += -e cycles -e instructions\
 			 -e l2_rqsts.all_demand_references -e l2_rqsts.all_demand_miss\
-			 -e l2_rqsts.swpf_hit -e l2_rqsts.swpf_miss
+			 -e l2_rqsts.all_hwpf -e l2_rqsts.hwpf_miss
 
 # 测 AMX 指令使用情况
 # 			 -e exe.amx_busy
