@@ -23,11 +23,14 @@ CFLAGS = $(OPT_FLAGS) $(MATH_FLAGS) $(DEBUG_FLAGS) -fno-strict-aliasing
 CFLAGS += -MMD -MP
 LDFLAGS = $(OPT_FLAGS) -lnuma
 
-core ?= 1
+CORE ?= 0
+ifdef core
+  CORE := $(core)
+endif
 
-# core = 0,1,2 => NUM_CORE = 3
-# core = 0-29  => NUM_CORE = 30
-NUM_CORE := $(shell echo $(core) | awk '\
+# CORE = 0,1,2 => NUM_CORE = 3
+# CORE = 0-29  => NUM_CORE = 30
+NUM_CORE := $(shell echo $(CORE) | awk '\
 BEGIN{n=0} \
 { gsub(/,/," ",$$0); \
 	for(i=1;i<=NF;i++){ \
@@ -38,9 +41,9 @@ BEGIN{n=0} \
 	print n \
 }')
 
-# core = 0,1,2 => CORE_LIST = 0 1 2
-# core = 0-29  => CORE_LIST = 0 1 2 ... 29
-CORE_LIST := $(shell echo $(core) | awk '\
+# CORE = 0,1,2 => CORE_LIST = 0 1 2
+# CORE = 0-29  => CORE_LIST = 0 1 2 ... 29
+CORE_LIST := $(shell echo $(CORE) | awk '\
 BEGIN {OFS=" "} \
 { gsub(/,/," ",$$0); \
 	for(i=1;i<=NF;i++){ \
@@ -156,37 +159,37 @@ $(BIN): $(OBJ)
 
 run: $(BIN)
 	make lockfreq
-	taskset -c $(core) sudo ./$(BIN) \
+	taskset -c $(CORE) sudo ./$(BIN) \
 		--freq $(FREQ) --round $(LOOP) --core-list $(CORE_LIST_ARG)
 	make unlockfreq
 
 perf: $(BIN)
 	make lockfreq
-	taskset -c $(core) sudo perf stat $(PERFFLAGS) ./$(BIN) \
+	taskset -c $(CORE) sudo perf stat $(PERFFLAGS) ./$(BIN) \
 		--freq $(FREQ) --round $(LOOP) --core-list $(CORE_LIST_ARG)
 	make unlockfreq
 
 
 run-1-node: $(BIN)
 	# node 0
-	make lockfreq core="0-29"
+	make lockfreq CORE="0-29"
 	numactl --cpunodebind=0 --membind=0 ./$(BIN) \
 		--freq $(FREQ) --round $(LOOP) --node 1
-	make unlockfreq core="0-29"
+	make unlockfreq CORE="0-29"
 
 run-2-node: $(BIN)
 	# node 0,1
-	make lockfreq core="0-59"
+	make lockfreq CORE="0-59"
 	numactl --cpunodebind=0,1 --membind=0,1 ./$(BIN) \
 		--freq $(FREQ) --round $(LOOP) --node 2
-	make unlockfreq core="0-59"
+	make unlockfreq CORE="0-59"
 	
 run-4-node: $(BIN)
 	# node = 0,1,2,3
-	make lockfreq core="0-119"
+	make lockfreq CORE="0-119"
 	numactl --cpunodebind=0,1,2,3 --membind=0,1,2,3 ./$(BIN) \
 		--freq $(FREQ) --round $(LOOP) --node 4
-	make unlockfreq core="0-119"
+	make unlockfreq CORE="0-119"
 	
 clean:
 	rm -rf $(BUILD_DIR)

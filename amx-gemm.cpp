@@ -697,15 +697,19 @@ void Kernel::amx_gemm_compute() {
 }
 
 
-void KernelMT::work_per_thread(int tid, int core_id) {
+///////////////////////////////////////////////////////
+// Multi-threaded Kernel Management
+///////////////////////////////////////////////////////
+
+
+// 找到每个线程对应的 Kernel 实例并初始化
+void KernelMT::init_kernel_per_thread(int tid, int core_id) {
     try {
         bind_thread_to_cpu(core_id); // 绑定当前线程到物理核心
     } catch (const std::exception& e) {
         std::cerr << "Thread bind failed: " << e.what() << std::endl;
         return;
     }
-
-    Kernel::amx_init(); // 初始化 AMX
 
     int blocks_m = CEIL(M, TM);
     int blocks_n = CEIL(N, TN);
@@ -716,8 +720,9 @@ void KernelMT::work_per_thread(int tid, int core_id) {
     for (int block_id = tid; block_id < total_blocks; block_id += num_threads) {
         int bm = (block_id / blocks_n) * TM;
         int bn = (block_id % blocks_n) * TN;
-        // 启动计算内核实例
-        Kernel kernel(
+        
+        // 在 Kernel_pool 中创建 Kernel 实例
+        auto kernel_ptr = std::make_unique<Kernel>(
             MIN(TM, M - bm), MIN(TN, N - bn), K,
             lda, ldb, ldc,
             &A[OFFSET2D(bm, 0, lda)],
@@ -725,22 +730,137 @@ void KernelMT::work_per_thread(int tid, int core_id) {
             &C[OFFSET2D(bm, bn, ldc)]
         );
 
-        kernel.prepare_packed_data();
-        kernel.amx_gemm_compute();
-        kernel.restore_packed_data();
+        kernel_pool[block_id] = std::move(kernel_ptr);
     }
 }
 
 
+void KernelMT::init_kernels() {
+    int num_threads = params.core_list.size();
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads);
 
-void KernelMT::amx_gemm() {
+    int blocks_m = CEIL(M, TM);
+    int blocks_n = CEIL(N, TN);
+    int total_blocks = blocks_m * blocks_n;
+    kernel_pool.resize(total_blocks); // 调整 kernel_pool 大小以容纳所有线程的 Kernel 实例
+
+    // 启动线程
+    for (int i = 0; i < num_threads; ++i) {
+        threads.emplace_back(&KernelMT::init_kernel_per_thread, this, i, params.core_list[i]);
+    }
+
+    // 等待所有线程完成
+    for (auto& t : threads) {
+        if (t.joinable()) t.join();
+    }
+}
+
+
+void KernelMT::prepare_packed_data_per_thread(int tid, int core_id) {
+    try {
+        bind_thread_to_cpu(core_id); // 绑定当前线程到物理核心
+    } catch (const std::exception& e) {
+        std::cerr << "Thread bind failed: " << e.what() << std::endl;
+        return;
+    }
+
+    // 找到对应的 Kernel 实例
+    int num_threads = params.core_list.size();
+    int total_blocks = kernel_pool.size();
+    for (int block_id = tid; block_id < total_blocks; block_id += num_threads) {
+        auto& kernel = kernel_pool[block_id];
+        if (kernel) {
+            kernel->prepare_packed_data();
+        }
+    } 
+}
+
+
+void KernelMT::prepare_packed_data() {
     int num_threads = params.core_list.size();
     std::vector<std::thread> threads;
     threads.reserve(num_threads);
 
     // 启动线程
     for (int i = 0; i < num_threads; ++i) {
-        threads.emplace_back(&KernelMT::work_per_thread, this, i, params.core_list[i]);
+        threads.emplace_back(&KernelMT::prepare_packed_data_per_thread, this, i, params.core_list[i]);
+    }
+
+    // 等待所有线程完成
+    for (auto& t : threads) {
+        if (t.joinable()) t.join();
+    }
+}
+
+
+void KernelMT::amx_gemm_compute_per_thread(int tid, int core_id) {
+    try {
+        bind_thread_to_cpu(core_id); // 绑定当前线程到物理核心
+    } catch (const std::exception& e) {
+        std::cerr << "Thread bind failed: " << e.what() << std::endl;
+        return;
+    }
+
+    Kernel::amx_init(); // 初始化 AMX
+
+    // 找到对应的 Kernel 实例
+    int num_threads = params.core_list.size();
+    int total_blocks = kernel_pool.size();
+    for (int block_id = tid; block_id < total_blocks; block_id += num_threads) {
+        auto& kernel = kernel_pool[block_id];
+        if (kernel) {
+            kernel->amx_gemm_compute();
+        }
+    }
+}
+
+
+void KernelMT::amx_gemm_compute() {
+    int num_threads = params.core_list.size();
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads);
+
+    // 启动线程
+    for (int i = 0; i < num_threads; ++i) {
+        threads.emplace_back(&KernelMT::amx_gemm_compute_per_thread, this, i, params.core_list[i]);
+    }
+
+    // 等待所有线程完成
+    for (auto& t : threads) {
+        if (t.joinable()) t.join();
+    }
+}
+
+
+void KernelMT::restore_packed_data_per_thread(int tid, int core_id) {
+    try {
+        bind_thread_to_cpu(core_id); // 绑定当前线程到物理核心
+    } catch (const std::exception& e) {
+        std::cerr << "Thread bind failed: " << e.what() << std::endl;
+        return;
+    }
+
+    // 找到对应的 Kernel 实例
+    int num_threads = params.core_list.size();
+    int total_blocks = kernel_pool.size();
+    for (int block_id = tid; block_id < total_blocks; block_id += num_threads) {
+        auto& kernel = kernel_pool[block_id];
+        if (kernel) {
+            kernel->restore_packed_data();
+        }
+    }
+}
+
+
+void KernelMT::restore_packed_data() {
+    int num_threads = params.core_list.size();
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads);
+
+    // 启动线程
+    for (int i = 0; i < num_threads; ++i) {
+        threads.emplace_back(&KernelMT::restore_packed_data_per_thread, this, i, params.core_list[i]);
     }
 
     // 等待所有线程完成

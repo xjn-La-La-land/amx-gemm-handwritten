@@ -58,16 +58,22 @@ public:
                 kernel.amx_gemm_compute();
             auto end_time = std::chrono::high_resolution_clock::now();
 
+            // kernel.restore_packed_data();
+
             double elapsed_seconds = std::chrono::duration<double>(end_time - start_time).count();
             report_performance(M, N, K, elapsed_seconds);
         } else {
             amx::GEMMKernelInt8MT kernel(M, N, K, K, N, N, A.get(), B.get(), C.get(), thread_params);
-            kernel.amx_gemm(); // warm up
+            kernel.init_kernels();
+            kernel.prepare_packed_data();
+            kernel.amx_gemm_compute(); // warm up
 
             auto start_time = std::chrono::high_resolution_clock::now();
             for (int i = 0; i < loop_count; i++) 
-                kernel.amx_gemm();
+                kernel.amx_gemm_compute();
             auto end_time = std::chrono::high_resolution_clock::now();
+
+            // kernel.restore_packed_data();
 
             double elapsed_seconds = std::chrono::duration<double>(end_time - start_time).count();
             report_performance(M, N, K, elapsed_seconds);
@@ -209,9 +215,9 @@ int main(int argc, char** argv) {
 
     for (int i = 512; i <= 8192; i += 256) {
         // int m = ROUNDUP(i, TM);
-        int m = i;
-        int n = 512;
-        int k = 1280;
+        int m = 8192;
+        int n = 8192;
+        int k = i;
         tester.run_test(m, n, k);
     }
 

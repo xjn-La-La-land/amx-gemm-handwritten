@@ -171,13 +171,14 @@ public:
     }
 
     void cpu_gemm_ref(); // 3-nested loops with no amx
-    void amx_gemm_compute(); // Top-level AMX GEMM function
+    void amx_gemm_compute();
 
     // write back packed C matrix to original layout
     void restore_packed_data() {
         if (params.packC) bufferC.unpack();
     }
 
+    // Top-level AMX GEMM function
     void amx_gemm() {
         amx_init();
         prepare_packed_data();
@@ -509,7 +510,19 @@ public:
     static constexpr int TN = 512;
     static constexpr int TK = 1280;
 
-    void amx_gemm(); // Top-level AMX GEMM function
+    void init_kernels(); // initialize kernel instances per thread
+    void prepare_packed_data();
+    void amx_gemm_compute();
+    void restore_packed_data();
+
+    // Top-level AMX GEMM function
+    void amx_gemm() {
+        init_kernels();
+        prepare_packed_data();
+        amx_gemm_compute();
+        restore_packed_data();
+    }
+
 
 private:
     // Matrix parameters
@@ -522,8 +535,15 @@ private:
 
     ThreadParams params; // Thread parameters
 
+
+    // 数据重排和计算分离的接口,需要维护一个 Kernel 队列
+    std::vector<std::unique_ptr<GEMMKernelInt8>> kernel_pool;
     // 内部 Worker 函数，每个线程执行这个函数
-    void work_per_thread(int tid, int core_id);
+    void init_kernel_per_thread(int tid, int core_id);
+    void prepare_packed_data_per_thread(int tid, int core_id);
+    void amx_gemm_compute_per_thread(int tid, int core_id);
+    void restore_packed_data_per_thread(int tid, int core_id);
+
 };
 
 
