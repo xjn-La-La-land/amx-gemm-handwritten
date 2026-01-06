@@ -28,10 +28,10 @@ public:
     void init_env(int argc, char** argv) {
         parse_args(argc, argv);
 
-        gemm_params.swpfB = false;
+        // gemm_params.swpfB = false;
         // gemm_params.swpfC = false;
-        // gemm_params.packA = false;
-        disable_hwpf = true;
+        // gemm_params.swpfA = false;
+        // disable_hwpf = true;
 
         if (disable_hwpf) 
             HWPFCtrl::disable_prefetchers(thread_params.core_list);
@@ -221,18 +221,18 @@ int main(int argc, char** argv) {
     PerformanceTester tester;
     tester.init_env(argc, argv);
 
-    // for (int i = 512; i <= 8192; i += 256) {
-    //     // int m = ROUNDUP(i, TM);
-    //     int m = i;
-    //     int n = i;
-    //     int k = 1280;
-    //     tester.run_test(m, n, k);
-    // }
+    for (int i = 512; i <= 8192; i += 256) {
+        // int m = ROUNDUP(i, TM);
+        int m = 512;
+        int n = i;
+        int k = 1280;
+        tester.run_test(m, n, k);
+    }
 
     // for (int i = 1; i <=8; i++) 
     //     tester.run_test(512, 512, 1280 * i);
 
-    tester.run_test(512, 512, 5120);
+    // tester.run_test(512, 512, 5120);
 
     return 0;
 }

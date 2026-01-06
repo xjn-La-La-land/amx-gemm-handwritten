@@ -188,6 +188,29 @@ void Kernel::BufferC::unpack() {
 }
 
 
+// SWPWrapper specialization for Enable = true
+template<> 
+struct Kernel::SWPWrapper<true> {
+    SWPFetcher impl;
+
+    ALWAYS_INLINE void init(size_t size, int step, const int8_t* ptr) {
+        impl = SWPFetcher(size, step, ptr);
+    }
+
+    ALWAYS_INLINE void set_on(bool on) {
+        impl.on = on;
+    }
+
+    ALWAYS_INLINE void prefetch() {
+        impl.prefetch();
+    }
+
+    ALWAYS_INLINE const int8_t*& ptr() {
+        return impl.ptr;
+    }
+};
+
+
 
 ///////////////////////////////////////////////////////
 // AMX GEMM compute kernel
@@ -286,19 +309,21 @@ template <bool SWPF_A, bool SWPF_B, bool SWPF_C>
 void Kernel::amx_gemm_core_packAB_v1_template(taskSize *task) {
     const int8_t *A_ptr, *B_ptr;
 
-    std::unique_ptr<SWPFetcher> swpf_ctx_A, swpf_ctx_B, swpf_ctx_C;
+    SWPWrapper<SWPF_A> swpf_ctx_A;
+    SWPWrapper<SWPF_B> swpf_ctx_B;
+    SWPWrapper<SWPF_C> swpf_ctx_C;
 
     if constexpr (SWPF_B) {
         const int8_t *next_B_ptr = task->B + task->N * task->K; // prefetch next TN×TK blockB
-        swpf_ctx_B = std::make_unique<SWPFetcher>(task->N * task->K, 1, next_B_ptr);
+        swpf_ctx_B.init(task->N * task->K, 2, next_B_ptr);
     }
     for (int i = 0; i < task->M; i += M_STEP) {
         B_ptr = task->B; // packed B block address
 
         if constexpr (SWPF_A) {
             const int8_t *next_A_ptr = task->A + (i + M_STEP) * task->K; // prefetch next 32×TK blockA
-            swpf_ctx_A = std::make_unique<SWPFetcher>(M_STEP * task->K, 2, next_A_ptr);
-            swpf_ctx_A->on = (i + M_STEP < task->M);
+            swpf_ctx_A.init(M_STEP * task->K, 2, next_A_ptr);
+            swpf_ctx_A.set_on(i + M_STEP < task->M);
         }
         for (int j = 0; j < task->N; j += N_STEP) {
             A_ptr = task->A + i * task->K; // packed A block address
@@ -308,8 +333,8 @@ void Kernel::amx_gemm_core_packAB_v1_template(taskSize *task) {
                 int next_i = (j + N_STEP == task->N)? i + M_STEP : i;
                 int next_j = (j + N_STEP == task->N)? 0 : j + N_STEP;
                 const int8_t *next_C_ptr = reinterpret_cast<const int8_t*>(&task->C[OFFSET2D(next_i, next_j, ldc)]);
-                swpf_ctx_C = std::make_unique<SWPFetcher>(M_STEP * N_STEP * sizeof(int32_t), 2, next_C_ptr);
-                swpf_ctx_C->on = (next_i < task->M);
+                swpf_ctx_C.init(M_STEP * N_STEP * sizeof(int32_t), 2, next_C_ptr);
+                swpf_ctx_C.set_on(!( (j + N_STEP == task->N) && (i + M_STEP == task->M) )); // not last block
             }
             #pragma GCC unroll 20 // GEMM core loop, TK / K_STEP = 20
             for (int k = 0; k < task->K; k += K_STEP) {
@@ -323,13 +348,13 @@ void Kernel::amx_gemm_core_packAB_v1_template(taskSize *task) {
                 A_ptr += TILE_SIZE_i8; // tileload A1
                 run_4_tdp();
 
-                if constexpr (SWPF_A) swpf_ctx_A->prefetch();
-                if constexpr (SWPF_B) swpf_ctx_B->prefetch();
+                if constexpr (SWPF_A) swpf_ctx_A.prefetch();
+                if constexpr (SWPF_B) swpf_ctx_B.prefetch();
                 if constexpr (SWPF_C) {
-                    swpf_ctx_C->prefetch();
-                    swpf_ctx_C->ptr += (ldc * sizeof(int32_t) - 2 * CACHELINE_SIZE); // move to next row in C
-                    swpf_ctx_C->prefetch();
-                    swpf_ctx_C->ptr += (ldc * sizeof(int32_t) - 2 * CACHELINE_SIZE);
+                    swpf_ctx_C.prefetch();
+                    swpf_ctx_C.ptr() += (ldc * sizeof(int32_t) - 2 * CACHELINE_SIZE); // move to next row in C
+                    swpf_ctx_C.prefetch();
+                    swpf_ctx_C.ptr() += (ldc * sizeof(int32_t) - 2 * CACHELINE_SIZE);
                 }
             }
             store_4_tileC_l1(&task->C[OFFSET2D(i, j, ldc)], ldc);
@@ -373,19 +398,21 @@ template <bool SWPF_A, bool SWPF_B, bool SWPF_C>
 void Kernel::amx_gemm_core_packAB_v2_template(taskSize *task) {
     const int8_t *A_ptr, *B_ptr;
 
-    std::unique_ptr<SWPFetcher> swpf_ctx_A, swpf_ctx_B, swpf_ctx_C;
+    SWPWrapper<SWPF_A> swpf_ctx_A;
+    SWPWrapper<SWPF_B> swpf_ctx_B;
+    SWPWrapper<SWPF_C> swpf_ctx_C;
 
     if constexpr (SWPF_A) {
         const int8_t *next_A_ptr = task->A + task->M * task->K; // prefetch next TM×TK blockA
-        swpf_ctx_A = std::make_unique<SWPFetcher>(task->M * task->K, 1, next_A_ptr);
+        swpf_ctx_A.init(task->M * task->K, 2, next_A_ptr);
     }
     for (int j = 0; j < task->N; j += N_STEP) {
         A_ptr = task->A;
 
         if constexpr (SWPF_B) {
             const int8_t *next_B_ptr = task->B + (j + N_STEP) * task->K; // prefetch next 32×TK blockB
-            swpf_ctx_B = std::make_unique<SWPFetcher>(N_STEP * task->K, 2, next_B_ptr);
-            swpf_ctx_B->on = (j + N_STEP < task->N);
+            swpf_ctx_B.init(N_STEP * task->K, 2, next_B_ptr);
+            swpf_ctx_B.set_on(j + N_STEP < task->N);
         }
         for (int i = 0; i < task->M; i += M_STEP) {
             B_ptr = task->B + j * task->K;
@@ -395,9 +422,8 @@ void Kernel::amx_gemm_core_packAB_v2_template(taskSize *task) {
                 int next_i = (i + M_STEP == task->M)? 0 : i + M_STEP;
                 int next_j = (i + M_STEP == task->M)? (j + N_STEP) : j;
                 const int8_t *next_C_ptr = reinterpret_cast<const int8_t*>(&task->C[OFFSET2D(next_i, next_j, ldc)]);
-
-                swpf_ctx_C = std::make_unique<SWPFetcher>(M_STEP * N_STEP * sizeof(int32_t), 2, next_C_ptr);
-                swpf_ctx_C->on = (next_j < task->N);
+                swpf_ctx_C.init(M_STEP * N_STEP * sizeof(int32_t), 2, next_C_ptr);
+                swpf_ctx_C.set_on(!((i + M_STEP == task->M) && (j + N_STEP == task->N))); // not last block
             }
             #pragma GCC unroll 20 // GEMM core loop, TK / K_STEP = 20
             for (int k = 0; k < task->K; k += K_STEP) {
@@ -411,13 +437,13 @@ void Kernel::amx_gemm_core_packAB_v2_template(taskSize *task) {
                 A_ptr += TILE_SIZE_i8; // tileload A1
                 run_4_tdp();
 
-                if constexpr (SWPF_B) swpf_ctx_B->prefetch();
-                if constexpr (SWPF_A) swpf_ctx_A->prefetch();
+                if constexpr (SWPF_B) swpf_ctx_B.prefetch();
+                if constexpr (SWPF_A) swpf_ctx_A.prefetch();
                 if constexpr (SWPF_C) {
-                    swpf_ctx_C->prefetch();
-                    swpf_ctx_C->ptr += (ldc * sizeof(int32_t) - 2 * CACHELINE_SIZE); // move to next row in C
-                    swpf_ctx_C->prefetch();
-                    swpf_ctx_C->ptr += (ldc * sizeof(int32_t) - 2 * CACHELINE_SIZE);
+                    swpf_ctx_C.prefetch();
+                    swpf_ctx_C.ptr() += (ldc * sizeof(int32_t) - 2 * CACHELINE_SIZE); // move to next row in C
+                    swpf_ctx_C.prefetch();
+                    swpf_ctx_C.ptr() += (ldc * sizeof(int32_t) - 2 * CACHELINE_SIZE);
                 }
             }
             store_4_tileC_l1(&task->C[OFFSET2D(i, j, ldc)], ldc);
@@ -461,19 +487,22 @@ template <bool SWPF_A, bool SWPF_B, bool SWPF_C>
 void Kernel::amx_gemm_core_packABC_v1_template(taskSize *task) {
     const int8_t *A_ptr, *B_ptr;
     int32_t *C_ptr = task->C;
-    std::unique_ptr<SWPFetcher> swpf_ctx_A, swpf_ctx_B, swpf_ctx_C;
+
+    SWPWrapper<SWPF_A> swpf_ctx_A;
+    SWPWrapper<SWPF_B> swpf_ctx_B;
+    SWPWrapper<SWPF_C> swpf_ctx_C;
 
     if constexpr (SWPF_B) {
         const int8_t *next_B_ptr = task->B + task->N * task->K; // prefetch next TN×TK blockB
-        swpf_ctx_B = std::make_unique<SWPFetcher>(task->N * task->K, 2, next_B_ptr);
+        swpf_ctx_B.init(task->N * task->K, 2, next_B_ptr);
     }
     for (int i = 0; i < task->M; i += M_STEP) {
         B_ptr = task->B;
 
         if constexpr (SWPF_A) {
             const int8_t *next_A_ptr = task->A + (i + M_STEP) * task->K; // prefetch next 32×TK blockA
-            swpf_ctx_A = std::make_unique<SWPFetcher>(M_STEP * task->K, 2, next_A_ptr);
-            // swpf_ctx_A->on = (i + M_STEP < task->M);
+            swpf_ctx_A.init(M_STEP * task->K, 2, next_A_ptr);
+            // swpf_ctx_A.set_on(i + M_STEP < task->M);
         }
         for (int j = 0; j < task->N; j += N_STEP) {
             A_ptr = task->A + i * task->K;
@@ -481,8 +510,8 @@ void Kernel::amx_gemm_core_packABC_v1_template(taskSize *task) {
 
             if constexpr (SWPF_C) {
                 const int8_t *next_C_ptr = reinterpret_cast<const int8_t*>(C_ptr + M_STEP * N_STEP);
-                swpf_ctx_C = std::make_unique<SWPFetcher>(M_STEP * N_STEP * sizeof(int32_t), 4, next_C_ptr);
-                // swpf_ctx_C->on = !((i + M_STEP == task->M) && (j + N_STEP == task->N)); // not last block
+                swpf_ctx_C.init(M_STEP * N_STEP * sizeof(int32_t), 4, next_C_ptr);
+                // swpf_ctx_C.set_on(!((i + M_STEP == task->M) && (j + N_STEP == task->N))); // not last block
             }
 
             #pragma GCC unroll 20 // GEMM core loop, TK / K_STEP = 20
@@ -497,9 +526,9 @@ void Kernel::amx_gemm_core_packABC_v1_template(taskSize *task) {
                 A_ptr += TILE_SIZE_i8; // tileload A1
                 run_4_tdp();
 
-                if constexpr (SWPF_B) swpf_ctx_B->prefetch();
-                if constexpr (SWPF_A) swpf_ctx_A->prefetch();
-                if constexpr (SWPF_C) swpf_ctx_C->prefetch();
+                if constexpr (SWPF_B) swpf_ctx_B.prefetch();
+                if constexpr (SWPF_A) swpf_ctx_A.prefetch();
+                if constexpr (SWPF_C) swpf_ctx_C.prefetch();
             } // end for k
             store_4_tileC_l1(C_ptr);
             C_ptr += 4 * TILE_SIZE_i32;
@@ -545,19 +574,21 @@ void Kernel::amx_gemm_core_packABC_v2_template(taskSize *task) {
     const int8_t *A_ptr, *B_ptr;
     int32_t *C_ptr = task->C;
 
-    std::unique_ptr<SWPFetcher> swpf_ctx_A, swpf_ctx_B, swpf_ctx_C;
+    SWPWrapper<SWPF_A> swpf_ctx_A;
+    SWPWrapper<SWPF_B> swpf_ctx_B;
+    SWPWrapper<SWPF_C> swpf_ctx_C;
 
     if constexpr (SWPF_A) {
         const int8_t *next_A_ptr = task->A + task->M * task->K; // prefetch next TM×TK blockA
-        swpf_ctx_A = std::make_unique<SWPFetcher>(task->M * task->K, 1, next_A_ptr);
+        swpf_ctx_A.init(task->M * task->K, 2, next_A_ptr);
     }
     for (int j = 0; j < task->N; j += N_STEP) {
         A_ptr = task->A;
 
         if constexpr (SWPF_B) {
             const int8_t *next_B_ptr = task->B + (j + N_STEP) * task->K; // prefetch next 32×TK blockB
-            swpf_ctx_B = std::make_unique<SWPFetcher>(N_STEP * task->K, 2, next_B_ptr);
-            swpf_ctx_B->on = (j + N_STEP < task->N);
+            swpf_ctx_B.init(N_STEP * task->K, 2, next_B_ptr);
+            // swpf_ctx_B.set_on(j + N_STEP < task->N);
         }
         for (int i = 0; i < task->M; i += M_STEP) {
             B_ptr = task->B + j * task->K;
@@ -565,10 +596,9 @@ void Kernel::amx_gemm_core_packABC_v2_template(taskSize *task) {
 
             if constexpr (SWPF_C) {
                 const int8_t *next_C_ptr = reinterpret_cast<const int8_t*>(C_ptr + M_STEP * N_STEP);
-                swpf_ctx_C = std::make_unique<SWPFetcher>(M_STEP * N_STEP * sizeof(int32_t), 4, next_C_ptr);
-                swpf_ctx_C->on = !((i + M_STEP == task->M) && (j + N_STEP == task->N)); // not last block
+                swpf_ctx_C.init(M_STEP * N_STEP * sizeof(int32_t), 4, next_C_ptr);
+                // swpf_ctx_C.set_on(!((i + M_STEP == task->M) && (j + N_STEP == task->N))); // not last block
             }
-
             #pragma GCC unroll 20 // GEMM core loop, TK / K_STEP = 20
             for (int k = 0; k < task->K; k += K_STEP) {
                 _tile_stream_loadd(4, A_ptr, MIN_STRIDE);
@@ -581,9 +611,9 @@ void Kernel::amx_gemm_core_packABC_v2_template(taskSize *task) {
                 B_ptr += TILE_SIZE_i8; // tileload B1
                 run_4_tdp();
 
-                if constexpr (SWPF_A) swpf_ctx_A->prefetch();
-                if constexpr (SWPF_B) swpf_ctx_B->prefetch();
-                if constexpr (SWPF_C) swpf_ctx_C->prefetch();
+                if constexpr (SWPF_A) swpf_ctx_A.prefetch();
+                if constexpr (SWPF_B) swpf_ctx_B.prefetch();
+                if constexpr (SWPF_C) swpf_ctx_C.prefetch();
             } // end for k
             store_4_tileC_l1(C_ptr);
             C_ptr += 4 * TILE_SIZE_i32;

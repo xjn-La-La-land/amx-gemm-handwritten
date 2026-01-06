@@ -69,7 +69,7 @@ struct alignas(64) TileConfig {
         palette_id = 1;
         start_row = 0;
         for (int i = 0; i < 8; i++) {
-            set_row_col(i, 0, 0);
+        set_row_col(i, 0, 0);
         }
     }
 
@@ -121,7 +121,6 @@ public:
     static constexpr int TM = 512;
     static constexpr int TN = 512;
     static constexpr int TK = 1280;
-    // static constexpr int TK = 512;
 
     GEMMKernelInt8(int M, int N, int K,
                    int lda, int ldb, int ldc,
@@ -138,7 +137,7 @@ public:
           bufferA(this), bufferB(this), bufferC(this)
     {
         if (M % M_STEP != 0 || N % N_STEP != 0 || K % K_STEP != 0) {
-            std::cerr << "[Error] Matrix dimensions must be multiples of Cache Blocking sizes!\n";
+            std::cerr << "[Error] Matrix dimensions must be multiples of blocking sizes!\n";
             std::abort();
         }
     }
@@ -149,20 +148,19 @@ public:
             std::cerr << "AMX initialization failed! Check if your CPU supports AMX." << std::endl;
             std::abort();
         }
-        TileConfig tile_cfg; // Initialize tile configuration
+        TileConfig tile_data; // Initialize tile configuration
         // tile 0,1,2,3 for C
-        tile_cfg.set_row_col(C00, MAX_ROWS, MAX_COLS_i32 * sizeof(int32_t));
-        tile_cfg.set_row_col(C01, MAX_ROWS, MAX_COLS_i32 * sizeof(int32_t));
-        tile_cfg.set_row_col(C10, MAX_ROWS, MAX_COLS_i32 * sizeof(int32_t));
-        tile_cfg.set_row_col(C11, MAX_ROWS, MAX_COLS_i32 * sizeof(int32_t));
+        #pragma GCC unroll 4
+        for (int i = 0; i < 4; i++)
+            tile_data.set_row_col(i, MAX_ROWS, MAX_COLS_i32 * sizeof(int32_t));
         // tile 4,5 for A
-        tile_cfg.set_row_col(A0, MAX_ROWS, MAX_COLS_i8 * sizeof(int8_t));
-        tile_cfg.set_row_col(A1, MAX_ROWS, MAX_COLS_i8 * sizeof(int8_t));
+        tile_data.set_row_col(A0, MAX_ROWS, MAX_COLS_i8 * sizeof(int8_t));
+        tile_data.set_row_col(A1, MAX_ROWS, MAX_COLS_i8 * sizeof(int8_t));
         // tile 6,7 for B
-        tile_cfg.set_row_col(B0, MAX_COLS_i8 / KPACK_b8, MAX_ROWS * KPACK_b8 * sizeof(int8_t));
-        tile_cfg.set_row_col(B1, MAX_COLS_i8 / KPACK_b8, MAX_ROWS * KPACK_b8 * sizeof(int8_t));
+        tile_data.set_row_col(B0, MAX_COLS_i8 / KPACK_b8, MAX_ROWS * KPACK_b8 * sizeof(int8_t));
+        tile_data.set_row_col(B1, MAX_COLS_i8 / KPACK_b8, MAX_ROWS * KPACK_b8 * sizeof(int8_t));
 
-        tile_cfg.set_config(); // Load tile configuration into hardware
+        tile_data.set_config(); // Load tile configuration into hardware
     }
 
     // data relayout
@@ -434,33 +432,45 @@ private:
     template <bool SWPF_A, bool SWPF_B, bool SWPF_C>
     void amx_gemm_core_packABC_v2_template(taskSize *task);
 
-    // software prefetcher helper
+    // software prefetch manager
     struct SWPFetcher {
-        bool on = true;    // enable flag
-        const int8_t *ptr = nullptr; // current prefetch pointer
+        bool on = true;
+        size_t size;
+        int step;
+        const int8_t* ptr = nullptr;
+
+        size_t pfched_size = 0;
 
         SWPFetcher() = default;
-        SWPFetcher(const size_t size, const int step, const int8_t *ptr)
+        SWPFetcher(size_t size, int step, const int8_t* ptr)
             : size(size), step(step), ptr(ptr) {}
-        // prefetch step * cacheline BYTES into L2
+
         ALWAYS_INLINE void prefetch() {
-            if (!on) [[unlikely]] return;
-            if (walked_size >= size) [[unlikely]] return;
+            if (!on || pfched_size >= size) [[unlikely]] return;
 
             #pragma GCC unroll 4
             for (int i = 0; i < step; i++) {
-                _mm_prefetch(ptr, hint);
+                _mm_prefetch(ptr, _MM_HINT_T1);
                 ptr += CACHELINE_SIZE;
             }
-            walked_size += step * CACHELINE_SIZE;
+            pfched_size += step * CACHELINE_SIZE;
         }
-
-    private:
-        const size_t size; // total size of BYTE to prefetch
-        const int step;    // prefetch step in one call
-        size_t walked_size = 0; // already prefetched size in BYTE
-        static constexpr _mm_hint hint = _MM_HINT_T1;
     };
+
+
+    // SWPWrapper: SWPF=true时，封装SWPFetcher；SWPF=false时，空实现
+    template<bool Enable>
+    struct SWPWrapper {
+        // SWPF=false：完全空实现
+        ALWAYS_INLINE void init(size_t, int, const int8_t*) {}
+        ALWAYS_INLINE void set_on(bool) {}
+        ALWAYS_INLINE void prefetch() {}
+        ALWAYS_INLINE const int8_t*& ptr() {
+            static const int8_t* dummy = nullptr;
+            return dummy;
+        }
+    };
+
 };
 
 // Thread parameters for multi-threaded GEMM
