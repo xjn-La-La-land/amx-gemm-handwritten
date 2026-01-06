@@ -2,12 +2,14 @@
 #include <iomanip>
 #include "CLI11.hpp" // CLIUtils
 
-#define LINE "-----------------------------------------------------------------\n"
+#define LINE "-------------------------------------------------------------------\n"
+
+using namespace amx;
 
 // Performance test
 class PerformanceTester {
-    amx::ThreadParams thread_params = amx::ThreadParams();
-    amx::GEMMParams gemm_params = amx::GEMMParams();
+    ThreadParams thread_params = ThreadParams();
+    GEMMParams gemm_params = GEMMParams();
     double frequency_hz = 2.3e9;
     int loop_count = 10;
     bool disable_hwpf = false;
@@ -25,6 +27,12 @@ public:
     // 初始化测试环境
     void init_env(int argc, char** argv) {
         parse_args(argc, argv);
+
+        gemm_params.swpfB = false;
+        // gemm_params.swpfC = false;
+        // gemm_params.packA = false;
+        disable_hwpf = true;
+
         if (disable_hwpf) 
             HWPFCtrl::disable_prefetchers(thread_params.core_list);
         else
@@ -48,7 +56,7 @@ public:
         std::fill_n(C.get(), M * N, 1);
 
         if (thread_params.core_list.size() == 1) {
-            amx::GEMMKernelInt8 kernel(M, N, K, K, N, N, A.get(), B.get(), C.get(), gemm_params);
+            GEMMKernelInt8 kernel(M, N, K, K, N, N, A.get(), B.get(), C.get(), gemm_params);
             kernel.amx_init();
             kernel.prepare_packed_data();
             kernel.amx_gemm_compute(); // warm up
@@ -63,7 +71,7 @@ public:
             double elapsed_seconds = std::chrono::duration<double>(end_time - start_time).count();
             report_performance(M, N, K, elapsed_seconds);
         } else {
-            amx::GEMMKernelInt8MT kernel(M, N, K, K, N, N, A.get(), B.get(), C.get(), thread_params);
+            GEMMKernelInt8MT kernel(M, N, K, K, N, N, A.get(), B.get(), C.get(), thread_params);
             kernel.init_kernels();
             kernel.prepare_packed_data();
             kernel.amx_gemm_compute(); // warm up
@@ -133,9 +141,9 @@ private:
         std::cout << "Matrix Layout: A - " << (gemm_params.packA ? "packed" : "normal") << ", "
                   << "B - " << (gemm_params.packB ? "packed" : "normal") << ", "
                   << "C - " << (gemm_params.packC ? "packed" : "normal") << "\n";
-        std::cout << "Cache Block Size: TM=" << amx::GEMMKernelInt8::TM
-                  << ", TN=" << amx::GEMMKernelInt8::TN
-                  << ", TK=" << amx::GEMMKernelInt8::TK << "\n";
+        std::cout << "Cache Block Size: TM=" << GEMMKernelInt8::TM
+                  << ", TN=" << GEMMKernelInt8::TN
+                  << ", TK=" << GEMMKernelInt8::TK << "\n";
         std::cout << "Prefetch Options:\n";
         std::cout << "  Hardware Prefetchers: " << (disable_hwpf ? "Off" : "On") << "\n";
         if (gemm_params.packA && gemm_params.swpfA) {
@@ -213,15 +221,18 @@ int main(int argc, char** argv) {
     PerformanceTester tester;
     tester.init_env(argc, argv);
 
-    for (int i = 512; i <= 8192; i += 256) {
-        // int m = ROUNDUP(i, TM);
-        int m = 8192;
-        int n = 8192;
-        int k = i;
-        tester.run_test(m, n, k);
-    }
+    // for (int i = 512; i <= 8192; i += 256) {
+    //     // int m = ROUNDUP(i, TM);
+    //     int m = i;
+    //     int n = i;
+    //     int k = 1280;
+    //     tester.run_test(m, n, k);
+    // }
 
-    // tester.run_test(512, 512, 1280);
+    // for (int i = 1; i <=8; i++) 
+    //     tester.run_test(512, 512, 1280 * i);
+
+    tester.run_test(512, 512, 5120);
 
     return 0;
 }
