@@ -135,6 +135,17 @@ void pack_tile_c(const int32_t* src, int32_t* dst, int ldc) {
 }
 
 
+void unpack_tile_c(const int32_t* src, int32_t* dst, int ldc) {
+    #pragma GCC unroll 16
+    for (int r = 0; r < MAX_ROWS; ++r) {
+        __m512i v = _mm512_load_si512(src);
+        _mm512_storeu_si512(dst, v);
+        src += MAX_COLS_i32;
+        dst += ldc;
+    }
+}
+
+
 // change the data layout of C matrix to enable dense tilestore
 void Kernel::BufferC::pack() {
     // allocate packed C buffer
@@ -184,29 +195,64 @@ void Kernel::BufferC::pack() {
 
 // restore C matrix from packed layout
 void Kernel::BufferC::unpack() {
-    // TODO: implement unpack
+    if (context->M >= context->N) {
+        for (int tn = 0; tn < context->N; tn += TN) {
+            const int32_t *src = data.get() + tn * context->M;
+            int32_t *dst = &context->C[OFFSET2D(0, tn, context->ldc)];
+            for (int m = 0; m < context->M; m += M_STEP) {
+                for (int n = 0; n < MIN(TN, context->N - tn); n += N_STEP) {
+                    // unpack 4 tiles of C
+                    unpack_tile_c(src, &dst[OFFSET2D(m, n, context->ldc)], context->ldc);
+                    unpack_tile_c(src + TILE_SIZE_i32, &dst[OFFSET2D(m, n + MAX_ROWS, context->ldc)], context->ldc);
+                    unpack_tile_c(src + 2 * TILE_SIZE_i32, &dst[OFFSET2D(m + MAX_ROWS, n, context->ldc)], context->ldc);
+                    unpack_tile_c(src + 3 * TILE_SIZE_i32, &dst[OFFSET2D(m + MAX_ROWS, n + MAX_ROWS, context->ldc)], context->ldc);
+                    src += 4 * TILE_SIZE_i32;
+                }
+            }
+        }
+    }
+    else {
+        for (int tm = 0; tm < context->M; tm += TM) {
+            const int32_t *src = data.get() + tm * context->N;
+            int32_t *dst = &context->C[OFFSET2D(tm, 0, context->ldc)];
+            for (int n = 0; n < context->N; n += N_STEP) {
+                for (int m = 0; m < MIN(TM, context->M - tm); m += M_STEP) {
+                    // unpack 4 tiles of C
+                    unpack_tile_c(src, &dst[OFFSET2D(m, n, context->ldc)], context->ldc);
+                    unpack_tile_c(src + TILE_SIZE_i32, &dst[OFFSET2D(m, n + MAX_ROWS, context->ldc)], context->ldc);
+                    unpack_tile_c(src + 2 * TILE_SIZE_i32, &dst[OFFSET2D(m + MAX_ROWS, n, context->ldc)], context->ldc);
+                    unpack_tile_c(src + 3 * TILE_SIZE_i32, &dst[OFFSET2D(m + MAX_ROWS, n + MAX_ROWS, context->ldc)], context->ldc);
+                    src += 4 * TILE_SIZE_i32;
+                }
+            }
+        }
+    }
 }
 
 
 // SWPWrapper specialization for Enable = true
 template<> 
 struct Kernel::SWPWrapper<true> {
-    SWPFetcher impl;
+    std::optional<SWPFetcher> impl;
 
     ALWAYS_INLINE void init(size_t size, int step, const int8_t* ptr) {
-        impl = SWPFetcher(size, step, ptr);
+        impl.emplace(size, step, ptr);
+    }
+
+    ALWAYS_INLINE void init(size_t size, int step, const int8_t* ptr, const _mm_hint hint) {
+        impl.emplace(size, step, ptr, hint);
     }
 
     ALWAYS_INLINE void set_on(bool on) {
-        impl.on = on;
+        impl->on = on;
     }
 
     ALWAYS_INLINE void prefetch() {
-        impl.prefetch();
+        impl->prefetch();
     }
 
     ALWAYS_INLINE const int8_t*& ptr() {
-        return impl.ptr;
+        return impl->ptr;
     }
 };
 
@@ -494,14 +540,16 @@ void Kernel::amx_gemm_core_packABC_v1_template(taskSize *task) {
 
     if constexpr (SWPF_B) {
         const int8_t *next_B_ptr = task->B + task->N * task->K; // prefetch next TN×TK blockB
-        swpf_ctx_B.init(task->N * task->K, 2, next_B_ptr);
+        const size_t size = task->N * task->K * sizeof(int8_t);
+        swpf_ctx_B.init(size, 2, next_B_ptr, _MM_HINT_T1);
     }
     for (int i = 0; i < task->M; i += M_STEP) {
         B_ptr = task->B;
 
         if constexpr (SWPF_A) {
             const int8_t *next_A_ptr = task->A + (i + M_STEP) * task->K; // prefetch next 32×TK blockA
-            swpf_ctx_A.init(M_STEP * task->K, 2, next_A_ptr);
+            const size_t size = M_STEP * task->K * sizeof(int8_t);
+            swpf_ctx_A.init(size, 2, next_A_ptr, _MM_HINT_T1);
             // swpf_ctx_A.set_on(i + M_STEP < task->M);
         }
         for (int j = 0; j < task->N; j += N_STEP) {
@@ -510,7 +558,7 @@ void Kernel::amx_gemm_core_packABC_v1_template(taskSize *task) {
 
             if constexpr (SWPF_C) {
                 const int8_t *next_C_ptr = reinterpret_cast<const int8_t*>(C_ptr + M_STEP * N_STEP);
-                swpf_ctx_C.init(M_STEP * N_STEP * sizeof(int32_t), 4, next_C_ptr);
+                swpf_ctx_C.init(M_STEP * N_STEP * sizeof(int32_t), 4, next_C_ptr, _MM_HINT_T1);
                 // swpf_ctx_C.set_on(!((i + M_STEP == task->M) && (j + N_STEP == task->N))); // not last block
             }
 
@@ -561,6 +609,9 @@ void Kernel::amx_gemm_core_packABC_v1(taskSize *task) {
             break;
         case 0b111:
             amx_gemm_core_packABC_v1_template<true, true, true>(task);
+            break;
+        case 0b110:
+            amx_gemm_core_packABC_v1_template<true, true, false>(task);
             break;
         default:
             throw std::runtime_error("Unsupported SWPF configuration!");

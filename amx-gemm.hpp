@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <memory>
 #include <thread>
+#include <optional>
 
 #include "utils.hpp"
 
@@ -150,9 +151,10 @@ public:
         }
         TileConfig tile_data; // Initialize tile configuration
         // tile 0,1,2,3 for C
-        #pragma GCC unroll 4
-        for (int i = 0; i < 4; i++)
-            tile_data.set_row_col(i, MAX_ROWS, MAX_COLS_i32 * sizeof(int32_t));
+        tile_data.set_row_col(C00, MAX_ROWS, MAX_COLS_i32 * sizeof(int32_t));
+        tile_data.set_row_col(C01, MAX_ROWS, MAX_COLS_i32 * sizeof(int32_t));
+        tile_data.set_row_col(C10, MAX_ROWS, MAX_COLS_i32 * sizeof(int32_t));
+        tile_data.set_row_col(C11, MAX_ROWS, MAX_COLS_i32 * sizeof(int32_t));
         // tile 4,5 for A
         tile_data.set_row_col(A0, MAX_ROWS, MAX_COLS_i8 * sizeof(int8_t));
         tile_data.set_row_col(A1, MAX_ROWS, MAX_COLS_i8 * sizeof(int8_t));
@@ -163,27 +165,34 @@ public:
         tile_data.set_config(); // Load tile configuration into hardware
     }
 
-    // data relayout
+    // data relayout & packing buffers
     void prepare_packed_data() {
         if (params.packA) bufferA.pack();
         if (params.packB) bufferB.pack();
         if (params.packC) bufferC.pack();
     }
 
-    void cpu_gemm_ref(); // 3-nested loops with no amx
-    void amx_gemm_compute();
+    void amx_gemm_compute(); // AMX GEMM compute function
 
     // write back packed C matrix to original layout
     void restore_packed_data() {
         if (params.packC) bufferC.unpack();
     }
 
+    void cpu_gemm_ref(); // 3-nested loops with no amx
     // Top-level AMX GEMM function
     void amx_gemm() {
         amx_init();
         prepare_packed_data();
         amx_gemm_compute();
         restore_packed_data();
+    }
+
+    // print matrices for debugging
+    void print_results() {
+        print_matrix("A", A, M, K, lda);
+        print_matrix("B", B, K, N, ldb);
+        print_matrix("C", C, M, N, ldc);
     }
 
 
@@ -438,19 +447,20 @@ private:
         size_t size;
         int step;
         const int8_t* ptr = nullptr;
+        const _mm_hint HINT; // 预取级别
 
         size_t pfched_size = 0;
 
         SWPFetcher() = default;
-        SWPFetcher(size_t size, int step, const int8_t* ptr)
-            : size(size), step(step), ptr(ptr) {}
+        SWPFetcher(size_t size, int step, const int8_t* ptr, const _mm_hint HINT = _MM_HINT_T1)
+            : size(size), step(step), ptr(ptr), HINT(HINT) {}
 
         ALWAYS_INLINE void prefetch() {
             if (!on || pfched_size >= size) [[unlikely]] return;
 
             #pragma GCC unroll 4
             for (int i = 0; i < step; i++) {
-                _mm_prefetch(ptr, _MM_HINT_T1);
+                _mm_prefetch(ptr, HINT);
                 ptr += CACHELINE_SIZE;
             }
             pfched_size += step * CACHELINE_SIZE;
@@ -463,6 +473,7 @@ private:
     struct SWPWrapper {
         // SWPF=false：完全空实现
         ALWAYS_INLINE void init(size_t, int, const int8_t*) {}
+        ALWAYS_INLINE void init(size_t, int, const int8_t*, const _mm_hint) {}
         ALWAYS_INLINE void set_on(bool) {}
         ALWAYS_INLINE void prefetch() {}
         ALWAYS_INLINE const int8_t*& ptr() {

@@ -31,7 +31,7 @@ public:
         // gemm_params.swpfB = false;
         // gemm_params.swpfC = false;
         // gemm_params.swpfA = false;
-        // disable_hwpf = true;
+        disable_hwpf = true;
 
         if (disable_hwpf) 
             HWPFCtrl::disable_prefetchers(thread_params.core_list);
@@ -146,7 +146,7 @@ private:
                   << ", TK=" << GEMMKernelInt8::TK << "\n";
         std::cout << "Prefetch Options:\n";
         std::cout << "  Hardware Prefetchers: " << (disable_hwpf ? "Off" : "On") << "\n";
-        if (gemm_params.packA && gemm_params.swpfA) {
+        if (gemm_params.packA) {
             std::cout << "  Software Prefetch A: " << (gemm_params.swpfA ? "On" : "Off") << "\n";
             std::cout << "  Software Prefetch B: " << (gemm_params.swpfB ? "On" : "Off") << "\n";
             std::cout << "  Software Prefetch C: " << (gemm_params.swpfC ? "On" : "Off") << "\n";
@@ -217,22 +217,81 @@ private:
 };
 
 
+
+void test_correctness() 
+{
+    int M = 1024, N = 1024, K = 2048;
+    // malloc matrices
+    auto deleter = [](void* p) { free(p); };
+    std::unique_ptr<int8_t, decltype(deleter)> A(
+        static_cast<int8_t*>(aligned_alloc(64, M * K * sizeof(int8_t))), deleter);
+    std::unique_ptr<int8_t, decltype(deleter)> B(
+        static_cast<int8_t*>(aligned_alloc(64, K * N * sizeof(int8_t))), deleter);
+    std::unique_ptr<int32_t, decltype(deleter)> C1(
+        static_cast<int32_t*>(aligned_alloc(64, M * N * sizeof(int32_t))), deleter);
+    std::unique_ptr<int32_t, decltype(deleter)> C2(
+        static_cast<int32_t*>(aligned_alloc(64, M * N * sizeof(int32_t))), deleter);
+
+    // initialize matrices
+    std::fill_n(A.get(), M * K, 2);
+    std::fill_n(B.get(), K * N, 1);
+    std::fill_n(C1.get(), M * N, 1);
+    std::fill_n(C2.get(), M * N, 1);
+
+    GEMMParams params = {
+        .packA = true,
+        .packB = true,
+        .packC = true,
+        .swpfA = true,
+        .swpfB = true,
+        .swpfC = true
+    };
+
+    GEMMKernelInt8 kernel_amx(M, N, K, K, N, N, A.get(), B.get(), C1.get(), params);
+    GEMMKernelInt8 kernel_ref(M, N, K, K, N, N, A.get(), B.get(), C2.get(), params);
+
+    kernel_amx.amx_gemm();
+    kernel_ref.cpu_gemm_ref();
+
+    for (int i = 0; i < M * N; i++) {
+        if (C1.get()[i] != C2.get()[i]) {
+            std::cerr << "[Error] AMX GEMM result does not match reference at index " << i << "!\n";
+        }
+    }
+
+    std::cout << "Correctness test passed! AMX GEMM results match reference implementation.\n";
+    std::cout << "=============== AMX GEMM Results: ==================\n";
+    kernel_amx.print_results();
+    std::cout << "=============== Reference GEMM Results: ============\n";
+    kernel_ref.print_results();
+}
+
+
+
+
 int main(int argc, char** argv) {
+    // ============= Correctness Test ================
+    // test_correctness();
+    
+    // ============= Performance Test ================
     PerformanceTester tester;
     tester.init_env(argc, argv);
 
-    for (int i = 512; i <= 8192; i += 256) {
-        // int m = ROUNDUP(i, TM);
-        int m = 512;
-        int n = i;
-        int k = 1280;
-        tester.run_test(m, n, k);
-    }
+    const int TM = GEMMKernelInt8::TM;
+    const int TN = GEMMKernelInt8::TN;
+    const int TK = GEMMKernelInt8::TK;
 
-    // for (int i = 1; i <=8; i++) 
-    //     tester.run_test(512, 512, 1280 * i);
+    // for (int i = 512; i <= 8192; i += 256) {
+    //     int m = i;
+    //     int n = TN;
+    //     int k = TK;
+    //     tester.run_test(m, n, k);
+    // }
 
-    // tester.run_test(512, 512, 5120);
+    for (int i = 1; i <= 8; i++) 
+        tester.run_test(TM, TN, i * TK);
+
+    // tester.run_test(TM, TN, TK);
 
     return 0;
 }
