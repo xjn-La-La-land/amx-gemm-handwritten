@@ -118,7 +118,10 @@ def plot_amx_util(
     plt.close(fig)
 
 
-DEFAULT_LABELS = ["GEMM (compute only)", "GEMM (online packing)"]
+DEFAULT_LABELS = ["GEMM (compute only)", 
+                  "GEMM (online packing)",
+                  "GEPP (online packing)", 
+                  "GEPB(online packing)"]
 
 
 def main():
