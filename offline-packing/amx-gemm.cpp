@@ -705,6 +705,51 @@ void Kernel::amx_gemm_core_packABC_v2(taskSize *task) {
 }
 
 
+/// @brief AMX GEMM Core **3A2B6C** Tiling with origin data layout (experimental)
+/// @param task Configuration for the current matrix block.
+void Kernel::amx_gemm_core_experimental(taskSize *task) {
+    auto full_task = get_full_task();
+    if (task == nullptr) task = &full_task;
+
+    const int M_STEP_EX = 3 * MAX_ROWS;
+    const int N_STEP_EX = 2 * MAX_ROWS;
+    const int K_STEP_EX = MAX_COLS_i8;
+
+    for (int i = 0; i < task->M; i += M_STEP_EX) {
+        for (int j = 0; j < task->N; j += N_STEP_EX) {
+            load_tileC_l1(0, task->C, i, j, ldc);
+            load_tileC_l1(1, task->C, i, j + MAX_COLS_i32, ldc);
+            load_tileC_l1(2, task->C, i + MAX_ROWS, j, ldc);
+            load_tileC_l1(3, task->C, i + MAX_ROWS, j + MAX_COLS_i32, ldc);
+            load_tileC_l1(4, task->C, i + 2 * MAX_ROWS, j, ldc);
+            load_tileC_l1(5, task->C, i + 2 * MAX_ROWS, j + MAX_COLS_i32, ldc);
+            #pragma GCC unroll 20 // GEMM core loop
+            for (int k = 0; k < task->K; k += K_STEP_EX) {
+                load_tileA_l2(6, task->A, i, k, lda); // load A0
+                load_tileB_l1(7, task->B, k, j, ldb); // load B0
+                _tile_dpbssd(0, 6, 7); // C00 += A0 * B0
+                load_tileB_l1(7, task->B, k, j + MAX_COLS_i32, ldb); // load B1
+                _tile_dpbssd(1, 6, 7); // C01 += A0 * B1
+                load_tileA_l2(6, task->A, i + MAX_ROWS, k, lda); // load A1
+                _tile_dpbssd(3, 6, 7); // C11 += A1 * B1
+                load_tileB_l1(7, task->B, k, j, ldb); // load B0
+                _tile_dpbssd(2, 6, 7); // C10 += A1 * B0
+                load_tileA_l2(6, task->A, i + 2 * MAX_ROWS, k, lda); // load A2
+                _tile_dpbssd(4, 6, 7); // C20 += A2 * B0
+                load_tileB_l1(7, task->B, k, j + MAX_COLS_i32, ldb); // load B1
+                _tile_dpbssd(5, 6, 7); // C21 += A2 * B1
+            }
+            store_tileC_l1(0, task->C, i, j, ldc);
+            store_tileC_l1(1, task->C, i, j + MAX_COLS_i32, ldc);
+            store_tileC_l1(2, task->C, i + MAX_ROWS, j, ldc);
+            store_tileC_l1(3, task->C, i + MAX_ROWS, j + MAX_COLS_i32, ldc);
+            store_tileC_l1(4, task->C, i + 2 * MAX_ROWS, j, ldc);
+            store_tileC_l1(5, task->C, i + 2 * MAX_ROWS, j + MAX_COLS_i32, ldc);
+        }
+    }
+}
+
+
 /// @brief AMX GEMM L2 blocking wrapper, computes the entire MxN matrix block
 void Kernel::amx_gemm_blocking() {
     void (Kernel::*gemm_core)(taskSize *task) = nullptr;

@@ -26,6 +26,19 @@
 #define ROUNDUP(x, y) (CEIL(x, y) * (y))
 #define ROUNDDOWN(x, y) ((x) / (y) * (y))
 
+// round up/down to nearest multiple of step
+template <typename T>
+constexpr T round_down(T a, T b) {
+    if (b <= 0) throw std::invalid_argument("b must be positive");
+    return (a / b) * b;
+}
+
+template <typename T>
+constexpr T round_up(T a, T b) {
+    if (b <= 0) throw std::invalid_argument("b must be positive");
+    return a == 0 ? 0 : ((a - 1) / b + 1) * b;
+}
+
 
 namespace HWPFCtrl {
 
@@ -195,9 +208,9 @@ inline void init_numa(int required_nodes, std::vector<int> &core_list) {
             throw std::runtime_error("Failed to get CPUs for NUMA node " + std::to_string(node_id));
         }
 
-        for (int cpu_id = 0; cpu_id < mask->size; ++cpu_id) {
+        for (unsigned long cpu_id = 0; cpu_id < mask->size; ++cpu_id) {
             if (numa_bitmask_isbitset(mask, cpu_id)) {
-                core_list.push_back(cpu_id);
+                core_list.push_back(static_cast<int>(cpu_id));
             }
         }
     }
@@ -315,3 +328,82 @@ void print_matrix(const std::string& name,
                   << " of " << rows << "x" << cols << ")\n";
     }
 }
+
+
+
+// print kernel routine
+inline const std::vector<std::string> routine_graphs = {
+    R"(
+        +--------------+      +--------------+  +--------------+
+        |              |      |              |  |              |
+        |              |      |              |  |              |
+        |     MxN      | :+=  |     MxK      |  |     KxN      |   GEMM
+        |              |      |              |  |              |
+        |              |      |              |  |              |
+        +--------------+      +--------------+  +--------------+
+                
+        +--------------+      +------+  +--------------+
+        |              |      |      |  |     KCxN     |
+        |              |      |      |  +--------------+
+        |     MxN      | :+=  | MxKC |                             GEPP
+        |              |      |      |
+        |              |      |      |
+        +--------------+      +------+
+
+        +------+      +------+  +-----+
+        |      |      |      |  |KCxNC|
+        |      |      |      |  +-----+
+        | MxNC | :+=  | MxKC |                                     GEPB
+        |      |      |      |
+        |      |      |      |
+        +------+      +------+
+    )",
+    R"(
+        +--------------+      +--------------+  +--------------+
+        |              |      |              |  |              |
+        |              |      |              |  |              |
+        |     MxN      | :+=  |     MxK      |  |     KxN      |   GEMM
+        |              |      |              |  |              |
+        |              |      |              |  |              |
+        +--------------+      +--------------+  +--------------+
+                
+        +--------------+      +------+  +--------------+
+        |              |      |      |  |     KCxN     |
+        |              |      |      |  +--------------+
+        |     MxN      | :+=  | MxKC |                             GEPP
+        |              |      |      |
+        |              |      |      |
+        +--------------+      +------+
+
+        +--------------+      +------+  +--------------+
+        |     MCxN     | :+=  |MCxKC |  |     KCxN     |           GEBP
+        +--------------+      +------+  +--------------+
+   
+    )",
+    R"(
+        +--------------+      +--------------+  +--------------+
+        |              |      |              |  |              |
+        |              |      |              |  |              |
+        |     MxN      | :+=  |     MxK      |  |     KxN      |   GEMM
+        |              |      |              |  |              |
+        |              |      |              |  |              |
+        +--------------+      +--------------+  +--------------+
+                
+        +--------------+      +--------------+  +--------------+
+        |     MCxN     | :+=  |     MCxK     |  |              |   GEPM
+        +--------------+      +--------------+  |              |
+                                                |     KxN      |
+                                                |              |
+                                                |              |
+                                                +--------------+
+
+        +------+      +--------------+  +------+
+        |MCxNC | :+=  |     MCxK     |  |      |                   GEPDOT
+        +------+      +--------------+  |      |
+                                        | KxNC |
+                                        |      |
+                                        |      |
+                                        +------+
+
+    )"
+};

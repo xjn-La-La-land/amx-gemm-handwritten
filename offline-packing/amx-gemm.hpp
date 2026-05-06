@@ -14,7 +14,7 @@
 #include <thread>
 #include <optional>
 
-#include "utils.hpp"
+#include "../utils.hpp"
 
 #if (defined(_WIN32) || defined(_WIN64))
 #define RESTRICT __restrict
@@ -429,6 +429,7 @@ private:
     void amx_gemm_core_packAB_v2(taskSize *task = nullptr);
     void amx_gemm_core_packABC_v1(taskSize *task = nullptr);
     void amx_gemm_core_packABC_v2(taskSize *task = nullptr);
+    void amx_gemm_core_experimental(taskSize *task = nullptr);
 
     void amx_gemm_blocking();
 

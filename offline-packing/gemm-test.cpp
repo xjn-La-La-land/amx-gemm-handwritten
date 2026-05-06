@@ -1,6 +1,6 @@
 #include "amx-gemm.hpp"
 #include <iomanip>
-#include "CLI11.hpp" // CLIUtils
+#include "../CLI11.hpp" // CLIUtils
 
 #define LINE "-------------------------------------------------------------------\n"
 
@@ -28,10 +28,14 @@ public:
     void init_env(int argc, char** argv) {
         parse_args(argc, argv);
 
+        // gemm_params.packA = false;
+        // gemm_params.packB = false;
+        // gemm_params.packC = false;
+
         // gemm_params.swpfB = false;
         // gemm_params.swpfC = false;
         // gemm_params.swpfA = false;
-        disable_hwpf = true;
+        // disable_hwpf = true;
 
         if (disable_hwpf) 
             HWPFCtrl::disable_prefetchers(thread_params.core_list);
@@ -59,14 +63,16 @@ public:
             GEMMKernelInt8 kernel(M, N, K, K, N, N, A.get(), B.get(), C.get(), gemm_params);
             kernel.amx_init();
             kernel.prepare_packed_data();
-            kernel.amx_gemm_compute(); // warm up
+            kernel.amx_gemm_compute();
+            kernel.restore_packed_data();
             
             auto start_time = std::chrono::high_resolution_clock::now();
-            for (int i = 0; i < loop_count; i++) 
+            for (int i = 0; i < loop_count; i++) {
+                kernel.prepare_packed_data();
                 kernel.amx_gemm_compute();
+                kernel.restore_packed_data();
+            }
             auto end_time = std::chrono::high_resolution_clock::now();
-
-            // kernel.restore_packed_data();
 
             double elapsed_seconds = std::chrono::duration<double>(end_time - start_time).count();
             report_performance(M, N, K, elapsed_seconds);
@@ -281,15 +287,15 @@ int main(int argc, char** argv) {
     const int TN = GEMMKernelInt8::TN;
     const int TK = GEMMKernelInt8::TK;
 
-    // for (int i = 512; i <= 8192; i += 256) {
-    //     int m = i;
-    //     int n = TN;
-    //     int k = TK;
-    //     tester.run_test(m, n, k);
-    // }
+    for (int i = 512; i <= 16384; i += 256) {
+        int m = i;
+        int n = i;
+        int k = i;
+        tester.run_test(m, n, k);
+    }
 
-    for (int i = 1; i <= 8; i++) 
-        tester.run_test(TM, TN, i * TK);
+    // for (int i = 1; i <= 8; i++) 
+    //     tester.run_test(TM, TN, i * TK);
 
     // tester.run_test(TM, TN, TK);
 
