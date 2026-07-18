@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
-import re
+import csv
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -9,26 +9,23 @@ import matplotlib.ticker as ticker
 import numpy as np
 
 
-LOG_PATTERN = re.compile(
-    r"M N K =\s*(?P<M>\d+)\s+(?P<N>\d+)\s+(?P<K>\d+),.*?Utilization =\s*(?P<util>[\d.]+)%"
-)
-
 SERIES_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd"]
 
 
 def parse_log(log_path: Path) -> list[list[tuple[int, float]]]:
-    """Split log into runs: a new run starts when M resets to a smaller value."""
+    """Read the CSV log (columns M,N,K,...,util_pct,...) and split into runs:
+    a new run starts when M resets to a smaller value (i.e. a fresh sweep appended)."""
     runs: list[list[tuple[int, float]]] = []
     current: list[tuple[int, float]] = []
     prev_m = -1
 
-    with log_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            match = LOG_PATTERN.search(line)
-            if not match:
-                continue
-            m = int(match.group("M"))
-            util = float(match.group("util"))
+    with log_path.open("r", encoding="utf-8", newline="") as f:
+        for row in csv.DictReader(f):
+            try:
+                m = int(row["M"])
+                util = float(row["util_pct"])
+            except (KeyError, ValueError):
+                continue  # 跳过异常行
             if m <= prev_m and current:
                 runs.append(current)
                 current = []
@@ -45,10 +42,14 @@ def parse_log(log_path: Path) -> list[list[tuple[int, float]]]:
 
 
 def resolve_default_log_path():
+    # 脚本在 tools/，仓库根为 parent.parent。CSV 日志(gemm-i8-*core.csv)通常生成在
+    # 运行 bench 的 cwd 或变体目录下，按常见位置依次尝试。
+    repo_root = Path(__file__).resolve().parent.parent
     candidates = [
-        Path(__file__).resolve().parent / "gemm-i8-1core.txt",
-        Path("gemm-i8-1core.txt"),
-        Path(__file__).resolve().parent.parent / "gemm-i8-1core.txt",
+        Path("gemm-i8-1core.csv"),                                # 当前工作目录
+        repo_root / "gemm-i8-1core.csv",                          # 仓库根
+        repo_root / "src" / "online-packing" / "gemm-i8-1core.csv",
+        repo_root / "src" / "offline-packing" / "gemm-i8-1core.csv",
     ]
     for path in candidates:
         if path.exists() and path.stat().st_size > 0:
