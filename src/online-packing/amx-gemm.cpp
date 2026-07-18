@@ -563,16 +563,16 @@ void Kernel::GEMM_compute() {
     GEPBKernelConfig cfg;
 
     for (int kc = 0; kc < K; kc += KC) {
-      BufferA<int8_t> panelA(A_ptr, M, MIN(KC, K - kc), 0, DataLayout::Dense);
+      BufferA<int8_t> panelA(A_ptr, M, min(KC, K - kc), 0, DataLayout::Dense);
 
       int32_t *C_ptr = bufC.data();
       cfg.overwrite_C = (kc == 0); // for the first kc block, we overwrite C,
                                    // for the rest, we accumulate into C
 
       for (int nc = 0; nc < N; nc += NC) {
-        BufferB<int8_t> blockB(B_ptr, MIN(KC, K - kc), MIN(NC, N - nc), 0,
+        BufferB<int8_t> blockB(B_ptr, min(KC, K - kc), min(NC, N - nc), 0,
                                DataLayout::Dense);
-        BufferC<int32_t> panelC(C_ptr, M, MIN(NC, N - nc), 0,
+        BufferC<int32_t> panelC(C_ptr, M, min(NC, N - nc), 0,
                                 DataLayout::Dense);
         GEPB_kernel(panelA, blockB, panelC, cfg);
         B_ptr += blockB.size();
@@ -585,15 +585,15 @@ void Kernel::GEMM_compute() {
     int8_t *A_ptr = bufA.data();
     int8_t *B_ptr = bufB.data();
     for (int kc = 0; kc < K; kc += KC) {
-      BufferB<int8_t> panelB(B_ptr, MIN(KC, K - kc), N, 0, DataLayout::Dense);
+      BufferB<int8_t> panelB(B_ptr, min(KC, K - kc), N, 0, DataLayout::Dense);
 
       int32_t *C_ptr = bufC.data();
       bool acc = kc != 0; // for the first kc block, we overwrite C, for the
                           // rest, we accumulate into C
       for (int mc = 0; mc < M; mc += MC) {
-        BufferA<int8_t> blockA(A_ptr, MIN(MC, M - mc), MIN(KC, K - kc), 0,
+        BufferA<int8_t> blockA(A_ptr, min(MC, M - mc), min(KC, K - kc), 0,
                                DataLayout::Dense);
-        BufferC<int32_t> panelC(C_ptr, MIN(MC, M - mc), N, 0,
+        BufferC<int32_t> panelC(C_ptr, min(MC, M - mc), N, 0,
                                 DataLayout::Dense);
         GEBP_kernel(blockA, panelB, panelC, acc); // compute kernel
         A_ptr += blockA.size();
@@ -636,17 +636,17 @@ void Kernel::GEMM_() {
     GEPBKernelConfig cfg;
 
     for (int kc = 0; kc < K; kc += KC) {
-      bufA.reset_cols(MIN(KC, K - kc));
-      bufB.reset_rows(MIN(KC, K - kc));
+      bufA.reset_cols(min(KC, K - kc));
+      bufB.reset_rows(min(KC, K - kc));
 
       int32_t *C_ptr = bufC.data();
       cfg.originA = &A[OFFSET2D(0, kc, lda)];
       cfg.overwrite_C = (kc == 0);
 
       for (int nc = 0; nc < N; nc += NC) {
-        bufB.reset_cols(MIN(NC, N - nc));
+        bufB.reset_cols(min(NC, N - nc));
         bufB.pack_from(&B[OFFSET2D(kc, nc, ldb)], ldb); // pack block B
-        BufferC<int32_t> panelC(C_ptr, M, MIN(NC, N - nc), MIN_STRIDE,
+        BufferC<int32_t> panelC(C_ptr, M, min(NC, N - nc), MIN_STRIDE,
                                 DataLayout::Dense);
 
         cfg.fuse_packA = nc == 0;
@@ -662,8 +662,8 @@ void Kernel::GEMM_() {
     assert(bufA.valid() && bufB.valid() && bufC.valid());
 
     for (int kc = 0; kc < K; kc += KC) {
-      bufA.reset_cols(MIN(KC, K - kc));
-      bufB.reset_rows(MIN(KC, K - kc));
+      bufA.reset_cols(min(KC, K - kc));
+      bufB.reset_rows(min(KC, K - kc));
 
       int32_t *C_ptr = bufC.data();
       bool acc = kc != 0; // for the first kc block, we overwrite C, for the
@@ -671,9 +671,9 @@ void Kernel::GEMM_() {
       const int8_t *B_kc_base = &B[OFFSET2D(kc, 0, ldb)]; // base addr of panelB
 
       for (int mc = 0; mc < M; mc += MC) {
-        bufA.reset_rows(MIN(MC, M - mc));
+        bufA.reset_rows(min(MC, M - mc));
         bufA.pack_from(&A[OFFSET2D(mc, kc, lda)], lda); // pack block A
-        BufferC<int32_t> panelC(C_ptr, MIN(MC, M - mc), N, MIN_STRIDE,
+        BufferC<int32_t> panelC(C_ptr, min(MC, M - mc), N, MIN_STRIDE,
                                 DataLayout::Dense);
         if (mc == 0) {
           GEBP_kernel(bufA, bufB, panelC, acc, B_kc_base);
@@ -696,16 +696,16 @@ void Kernel::GEPP_() {
     GEPBKernelConfig cfg;
 
     for (int kc = 0; kc < K; kc += KC) {
-      bufA.reset_cols(MIN(KC, K - kc));
-      bufB.reset_rows(MIN(KC, K - kc));
+      bufA.reset_cols(min(KC, K - kc));
+      bufB.reset_rows(min(KC, K - kc));
 
       cfg.overwrite_C = (kc == 0) && (params.beta == 0.0f);
       cfg.originA = &A[OFFSET2D(0, kc, lda)];
 
       for (int nc = 0; nc < N; nc += NC) {
-        bufB.reset_cols(MIN(NC, N - nc));
+        bufB.reset_cols(min(NC, N - nc));
         bufB.pack_from(&B[OFFSET2D(kc, nc, ldb)], ldb); // pack block B
-        BufferC<int32_t> panelC(&C[OFFSET2D(0, nc, ldc)], M, MIN(NC, N - nc),
+        BufferC<int32_t> panelC(&C[OFFSET2D(0, nc, ldc)], M, min(NC, N - nc),
                                 ldc, DataLayout::Strided);
 
         cfg.fuse_packA = nc == 0;
@@ -720,14 +720,14 @@ void Kernel::GEPP_() {
     assert(!bufC.valid()); // no buffer for C
 
     for (int kc = 0; kc < K; kc += KC) {
-      bufA.reset_cols(MIN(KC, K - kc));
-      bufB.reset_rows(MIN(KC, K - kc));
+      bufA.reset_cols(min(KC, K - kc));
+      bufB.reset_rows(min(KC, K - kc));
 
       const int8_t *B_kc_base = &B[OFFSET2D(kc, 0, ldb)]; // base addr of panelB
       for (int mc = 0; mc < M; mc += MC) {
-        bufA.reset_rows(MIN(MC, M - mc));
+        bufA.reset_rows(min(MC, M - mc));
         bufA.pack_from(&A[OFFSET2D(mc, kc, lda)], lda); // pack block A
-        BufferC<int32_t> panelC(&C[OFFSET2D(mc, 0, ldc)], MIN(MC, M - mc), N,
+        BufferC<int32_t> panelC(&C[OFFSET2D(mc, 0, ldc)], min(MC, M - mc), N,
                                 ldc, DataLayout::Strided);
         if (mc == 0) {
           GEBP_kernel(bufA, bufB, panelC, true, B_kc_base);
@@ -748,17 +748,17 @@ void Kernel::GEMP_() {
   GEPBKernelConfig cfg;
 
   for (int kc = 0; kc < K; kc += KC) {
-    bufB.reset_rows(MIN(KC, K - kc));
+    bufB.reset_rows(min(KC, K - kc));
     BufferA<int8_t> panelA(const_cast<int8_t *>(&A[OFFSET2D(0, kc, lda)]), M,
-                           MIN(KC, K - kc), lda, DataLayout::Strided);
+                           min(KC, K - kc), lda, DataLayout::Strided);
 
     cfg.overwrite_C = kc == 0;
     int32_t *C_ptr = bufC.data();
 
     for (int nc = 0; nc < N; nc += NC) {
-      bufB.reset_cols(MIN(NC, N - nc));
+      bufB.reset_cols(min(NC, N - nc));
       bufB.pack_from(&B[OFFSET2D(kc, nc, ldb)], ldb); // pack block B
-      BufferC<int32_t> panelC(C_ptr, M, MIN(NC, N - nc), MIN_STRIDE,
+      BufferC<int32_t> panelC(C_ptr, M, min(NC, N - nc), MIN_STRIDE,
                               DataLayout::Dense);
 
       GEPB_kernel(bufA, bufB, panelC, cfg);
@@ -784,16 +784,16 @@ void Kernel::GEPB_() {
   GEPBKernelConfig cfg;
 
   for (int kc = 0; kc < K; kc += KC) {
-    bufB.reset_rows(MIN(KC, K - kc));
+    bufB.reset_rows(min(KC, K - kc));
     BufferA<int8_t> panelA(const_cast<int8_t *>(&A[OFFSET2D(0, kc, lda)]), M,
-                           MIN(KC, K - kc), lda, DataLayout::Strided);
+                           min(KC, K - kc), lda, DataLayout::Strided);
 
     cfg.overwrite_C = (kc == 0) && (params.beta == 0.0f);
 
     for (int nc = 0; nc < N; nc += NC) {
-      bufB.reset_cols(MIN(NC, N - nc));
+      bufB.reset_cols(min(NC, N - nc));
       bufB.pack_from(&B[OFFSET2D(kc, nc, ldb)], ldb); // pack block B
-      BufferC<int32_t> panelC(&C[OFFSET2D(0, nc, ldc)], M, MIN(NC, N - nc), ldc,
+      BufferC<int32_t> panelC(&C[OFFSET2D(0, nc, ldc)], M, min(NC, N - nc), ldc,
                               DataLayout::Strided);
       GEPB_kernel(panelA, bufB, panelC, cfg);
     }
@@ -1267,8 +1267,8 @@ void KernelMT::init_kernel_per_thread(int tid, int core_id) {
     return;
   }
 
-  int blocks_m = CEIL(M, MC);
-  int blocks_n = CEIL(N, NC);
+  int blocks_m = ceil_div(M, MC);
+  int blocks_n = ceil_div(N, NC);
   int total_blocks = blocks_m * blocks_n;
   int num_threads = params.core_list.size();
 
@@ -1279,7 +1279,7 @@ void KernelMT::init_kernel_per_thread(int tid, int core_id) {
 
     // 在 Kernel_pool 中创建 Kernel 实例
     auto kernel_ptr = std::make_unique<Kernel>(
-        MIN(MC, M - bm), MIN(NC, N - bn), K, lda, ldb, ldc,
+        min(MC, M - bm), min(NC, N - bn), K, lda, ldb, ldc,
         &A[OFFSET2D(bm, 0, lda)], &B[OFFSET2D(0, bn, ldb)],
         &C[OFFSET2D(bm, bn, ldc)], gemm_params, BlockingConfig(MC, NC, KC));
 
@@ -1292,8 +1292,8 @@ void KernelMT::init_kernels() {
   std::vector<std::thread> threads;
   threads.reserve(num_threads);
 
-  int blocks_m = CEIL(M, MC);
-  int blocks_n = CEIL(N, NC);
+  int blocks_m = ceil_div(M, MC);
+  int blocks_n = ceil_div(N, NC);
   int total_blocks = blocks_m * blocks_n;
   kernel_pool.resize(
       total_blocks); // 调整 kernel_pool 大小以容纳所有线程的 Kernel 实例

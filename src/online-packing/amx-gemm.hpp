@@ -13,7 +13,8 @@
 #include <memory>
 #include <thread>
 
-#include "../utils.hpp"
+#include "utils.hpp"
+#include "thread_params.hpp"
 
 #if (defined(_WIN32) || defined(_WIN64))
 #define RESTRICT __restrict
@@ -665,12 +666,8 @@ private:
 
 
 
-// Thread parameters for multi-threaded GEMM
-struct ThreadParams {
-    std::vector<int> core_list = {0};
-    bool numa_aware = false;
-    int num_numa_node = 1;
-};
+// Thread parameters for multi-threaded GEMM: 见 common/thread_params.hpp
+// (与 bench_harness.hpp 共用同一定义)
 
 
 // AMX GEMM Kernel for int8 on multi-threads

@@ -30,7 +30,7 @@ void Kernel::BufferA::pack() {
         int8_t *dst = data.get() + tk * context->M;
 
         for (int m = 0; m < context->M; m += M_STEP) {
-            for (int k = 0; k < MIN(TK, context->K - tk); k += K_STEP) {
+            for (int k = 0; k < min(TK, context->K - tk); k += K_STEP) {
                 // pack 2 tiles of A
                 pack_tile_a(&src[OFFSET2D(m, k, context->lda)], dst, context->lda);
                 dst += TILE_SIZE_i8;
@@ -112,7 +112,7 @@ void Kernel::BufferB::pack() {
         int8_t *dst = data.get() + tk * context->N;
 
         for (int n = 0; n < context->N; n += N_STEP) {
-            for (int k = 0; k < MIN(TK, context->K - tk); k += K_STEP) {
+            for (int k = 0; k < min(TK, context->K - tk); k += K_STEP) {
                 // pack 2 tiles of B
                 pack_tile_b(&src[OFFSET2D(k, n, context->ldb)], dst, context->ldb);
                 dst += TILE_SIZE_i8;
@@ -161,7 +161,7 @@ void Kernel::BufferC::pack() {
             const int32_t *src = &context->C[OFFSET2D(0, tn, context->ldc)];
             int32_t *dst = data.get() + tn * context->M;
             for (int m = 0; m < context->M; m += M_STEP) {
-                for (int n = 0; n < MIN(TN, context->N - tn); n += N_STEP) {
+                for (int n = 0; n < min(TN, context->N - tn); n += N_STEP) {
                     // pack 4 tiles of C
                     pack_tile_c(&src[OFFSET2D(m, n, context->ldc)], dst, context->ldc);
                     pack_tile_c(&src[OFFSET2D(m, n + MAX_ROWS, context->ldc)], dst + TILE_SIZE_i32, context->ldc);
@@ -178,7 +178,7 @@ void Kernel::BufferC::pack() {
             int32_t *dst = data.get() + tm * context->N;
 
             for (int n = 0; n < context->N; n += N_STEP) {
-                for (int m = 0; m < MIN(TM, context->M - tm); m += M_STEP) {
+                for (int m = 0; m < min(TM, context->M - tm); m += M_STEP) {
                     // pack 4 tiles of C
                     pack_tile_c(&src[OFFSET2D(m, n, context->ldc)], dst, context->ldc);
                     pack_tile_c(&src[OFFSET2D(m, n + MAX_ROWS, context->ldc)], dst + TILE_SIZE_i32, context->ldc);
@@ -200,7 +200,7 @@ void Kernel::BufferC::unpack() {
             const int32_t *src = data.get() + tn * context->M;
             int32_t *dst = &context->C[OFFSET2D(0, tn, context->ldc)];
             for (int m = 0; m < context->M; m += M_STEP) {
-                for (int n = 0; n < MIN(TN, context->N - tn); n += N_STEP) {
+                for (int n = 0; n < min(TN, context->N - tn); n += N_STEP) {
                     // unpack 4 tiles of C
                     unpack_tile_c(src, &dst[OFFSET2D(m, n, context->ldc)], context->ldc);
                     unpack_tile_c(src + TILE_SIZE_i32, &dst[OFFSET2D(m, n + MAX_ROWS, context->ldc)], context->ldc);
@@ -216,7 +216,7 @@ void Kernel::BufferC::unpack() {
             const int32_t *src = data.get() + tm * context->N;
             int32_t *dst = &context->C[OFFSET2D(tm, 0, context->ldc)];
             for (int n = 0; n < context->N; n += N_STEP) {
-                for (int m = 0; m < MIN(TM, context->M - tm); m += M_STEP) {
+                for (int m = 0; m < min(TM, context->M - tm); m += M_STEP) {
                     // unpack 4 tiles of C
                     unpack_tile_c(src, &dst[OFFSET2D(m, n, context->ldc)], context->ldc);
                     unpack_tile_c(src + TILE_SIZE_i32, &dst[OFFSET2D(m, n + MAX_ROWS, context->ldc)], context->ldc);
@@ -306,10 +306,7 @@ void Kernel::amx_gemm_core(taskSize *task) {
     for (int i = 0; i < task->M; i += M_STEP) {
         for (int j = 0; j < task->N; j += N_STEP) {
             load_4_tileC_l2(&task->C[OFFSET2D(i, j, ldc)], ldc);
-            #pragma GCC unroll 20 // GEMM core loop, TK / K_STEP = 20
             for (int k = 0; k < task->K; k += K_STEP) {
-                // load_2_tileA_l1(&task->A[OFFSET2D(i, k, lda)], lda);
-                // load_2_tileB_l2(&task->B[OFFSET2D(k, j, ldb)], ldb);
                 load_tileB_l2(B0, task->B, k, j, ldb);
                 load_tileA_l1(A0, task->A, i, k, lda);
                 load_tileB_l2(B1, task->B, k, j + MAX_ROWS, ldb);
@@ -320,6 +317,25 @@ void Kernel::amx_gemm_core(taskSize *task) {
         }
     }
 }
+
+
+void Kernel::amx_gemm_core_pure_loop(taskSize *task) {
+    auto full_task = get_full_task();
+    if (task == nullptr) task = &full_task;
+
+    for (int i = 0; i < task->M; i += M_STEP) {
+        for (int j = 0; j < task->N; j += N_STEP) {
+            for (int k = 0; k < task->K; k += K_STEP) {
+                load_tileB_l2(B0, task->B, k, j, ldb);
+                load_tileA_l1(A0, task->A, i, k, lda);
+                load_tileB_l2(B1, task->B, k, j + MAX_ROWS, ldb);
+                load_tileA_l1(A1, task->A, i + MAX_ROWS, k, lda);
+                run_4_tdp();
+            }
+        }
+    }
+}
+
 
 
 /// @brief AMX GEMM Core **2A2B4C** Tiling with packed B
@@ -338,7 +354,6 @@ void Kernel::amx_gemm_core_packB(taskSize *task) {
         B_ptr = task->B; // packed B block address
         for (int j = 0; j < task->N; j += N_STEP) {
             load_4_tileC_l2(&task->C[OFFSET2D(i, j, ldc)], ldc);
-            #pragma GCC unroll 20 // GEMM core loop, TK / K_STEP = 20
             for (int k = 0; k < task->K; k += K_STEP) {
                 load_2_tileA_l1(&task->A[OFFSET2D(i, k, lda)], lda);
                 load_2_tileB_l2(B_ptr);
@@ -368,7 +383,7 @@ void Kernel::amx_gemm_core_packAB_v1_template(taskSize *task) {
 
         if constexpr (SWPF_A) {
             const int8_t *next_A_ptr = task->A + (i + M_STEP) * task->K; // prefetch next 32×TK blockA
-            swpf_ctx_A.init(M_STEP * task->K, 2, next_A_ptr);
+            swpf_ctx_A.init(M_STEP * task->K, 2, next_A_ptr, _MM_HINT_T0);
             swpf_ctx_A.set_on(i + M_STEP < task->M);
         }
         for (int j = 0; j < task->N; j += N_STEP) {
@@ -379,10 +394,9 @@ void Kernel::amx_gemm_core_packAB_v1_template(taskSize *task) {
                 int next_i = (j + N_STEP == task->N)? i + M_STEP : i;
                 int next_j = (j + N_STEP == task->N)? 0 : j + N_STEP;
                 const int8_t *next_C_ptr = reinterpret_cast<const int8_t*>(&task->C[OFFSET2D(next_i, next_j, ldc)]);
-                swpf_ctx_C.init(M_STEP * N_STEP * sizeof(int32_t), 2, next_C_ptr);
+                swpf_ctx_C.init(M_STEP * N_STEP * sizeof(int32_t), 2, next_C_ptr, _MM_HINT_T0);
                 swpf_ctx_C.set_on(!( (j + N_STEP == task->N) && (i + M_STEP == task->M) )); // not last block
             }
-            #pragma GCC unroll 20 // GEMM core loop, TK / K_STEP = 20
             for (int k = 0; k < task->K; k += K_STEP) {
                 _tile_stream_loadd(6, B_ptr, MIN_STRIDE);
                 B_ptr += TILE_SIZE_i8; // tileload B0
@@ -450,7 +464,7 @@ void Kernel::amx_gemm_core_packAB_v2_template(taskSize *task) {
 
     if constexpr (SWPF_A) {
         const int8_t *next_A_ptr = task->A + task->M * task->K; // prefetch next TM×TK blockA
-        swpf_ctx_A.init(task->M * task->K, 2, next_A_ptr);
+        swpf_ctx_A.init(task->M * task->K, 2, next_A_ptr, _MM_HINT_T0);
     }
     for (int j = 0; j < task->N; j += N_STEP) {
         A_ptr = task->A;
@@ -468,10 +482,9 @@ void Kernel::amx_gemm_core_packAB_v2_template(taskSize *task) {
                 int next_i = (i + M_STEP == task->M)? 0 : i + M_STEP;
                 int next_j = (i + M_STEP == task->M)? (j + N_STEP) : j;
                 const int8_t *next_C_ptr = reinterpret_cast<const int8_t*>(&task->C[OFFSET2D(next_i, next_j, ldc)]);
-                swpf_ctx_C.init(M_STEP * N_STEP * sizeof(int32_t), 2, next_C_ptr);
+                swpf_ctx_C.init(M_STEP * N_STEP * sizeof(int32_t), 2, next_C_ptr, _MM_HINT_T0);
                 swpf_ctx_C.set_on(!((i + M_STEP == task->M) && (j + N_STEP == task->N))); // not last block
             }
-            #pragma GCC unroll 20 // GEMM core loop, TK / K_STEP = 20
             for (int k = 0; k < task->K; k += K_STEP) {
                 _tile_stream_loadd(6, B_ptr, MIN_STRIDE);
                 B_ptr += TILE_SIZE_i8; // tileload B0
@@ -549,7 +562,7 @@ void Kernel::amx_gemm_core_packABC_v1_template(taskSize *task) {
         if constexpr (SWPF_A) {
             const int8_t *next_A_ptr = task->A + (i + M_STEP) * task->K; // prefetch next 32×TK blockA
             const size_t size = M_STEP * task->K * sizeof(int8_t);
-            swpf_ctx_A.init(size, 2, next_A_ptr, _MM_HINT_T1);
+            swpf_ctx_A.init(size, 2, next_A_ptr, _MM_HINT_T0);
             // swpf_ctx_A.set_on(i + M_STEP < task->M);
         }
         for (int j = 0; j < task->N; j += N_STEP) {
@@ -562,7 +575,6 @@ void Kernel::amx_gemm_core_packABC_v1_template(taskSize *task) {
                 // swpf_ctx_C.set_on(!((i + M_STEP == task->M) && (j + N_STEP == task->N))); // not last block
             }
 
-            #pragma GCC unroll 20 // GEMM core loop, TK / K_STEP = 20
             for (int k = 0; k < task->K; k += K_STEP) {
                 _tile_stream_loadd(6, B_ptr, MIN_STRIDE);
                 B_ptr += TILE_SIZE_i8; // tileload B0
@@ -631,7 +643,8 @@ void Kernel::amx_gemm_core_packABC_v2_template(taskSize *task) {
 
     if constexpr (SWPF_A) {
         const int8_t *next_A_ptr = task->A + task->M * task->K; // prefetch next TM×TK blockA
-        swpf_ctx_A.init(task->M * task->K, 2, next_A_ptr);
+        swpf_ctx_A.init(task->M * task->K, 2, next_A_ptr, _MM_HINT_T0);
+         // swpf_ctx_A.set_on(i + M_STEP < task->M);
     }
     for (int j = 0; j < task->N; j += N_STEP) {
         A_ptr = task->A;
@@ -650,7 +663,6 @@ void Kernel::amx_gemm_core_packABC_v2_template(taskSize *task) {
                 swpf_ctx_C.init(M_STEP * N_STEP * sizeof(int32_t), 4, next_C_ptr);
                 // swpf_ctx_C.set_on(!((i + M_STEP == task->M) && (j + N_STEP == task->N))); // not last block
             }
-            #pragma GCC unroll 20 // GEMM core loop, TK / K_STEP = 20
             for (int k = 0; k < task->K; k += K_STEP) {
                 _tile_stream_loadd(4, A_ptr, MIN_STRIDE);
                 A_ptr += TILE_SIZE_i8; // tileload A0
@@ -723,7 +735,6 @@ void Kernel::amx_gemm_core_experimental(taskSize *task) {
             load_tileC_l1(3, task->C, i + MAX_ROWS, j + MAX_COLS_i32, ldc);
             load_tileC_l1(4, task->C, i + 2 * MAX_ROWS, j, ldc);
             load_tileC_l1(5, task->C, i + 2 * MAX_ROWS, j + MAX_COLS_i32, ldc);
-            #pragma GCC unroll 20 // GEMM core loop
             for (int k = 0; k < task->K; k += K_STEP_EX) {
                 load_tileA_l2(6, task->A, i, k, lda); // load A0
                 load_tileB_l1(7, task->B, k, j, ldb); // load B0
@@ -748,6 +759,7 @@ void Kernel::amx_gemm_core_experimental(taskSize *task) {
         }
     }
 }
+
 
 
 /// @brief AMX GEMM L2 blocking wrapper, computes the entire MxN matrix block
@@ -775,8 +787,8 @@ void Kernel::amx_gemm_blocking() {
                     .B = bufferB.get_block(tk, tn, ldb),
                     .C = bufferC.get_block(0, tn, ldc),
                     .M = M,
-                    .N = MIN(TN, N - tn),
-                    .K = MIN(TK, K - tk)
+                    .N = min(TN, N - tn),
+                    .K = min(TK, K - tk)
                 };
                 (this->*gemm_core)(&task);
             }
@@ -787,9 +799,9 @@ void Kernel::amx_gemm_blocking() {
                     .A = bufferA.get_block(tk, tm, lda),
                     .B = bufferB.get_block(tk, 0, ldb),
                     .C = bufferC.get_block(tm, 0, ldc),
-                    .M = MIN(TM, M - tm),
+                    .M = min(TM, M - tm),
                     .N = N,
-                    .K = MIN(TK, K - tk)
+                    .K = min(TK, K - tk)
                 };
                 (this->*gemm_core)(&task);
             }
@@ -800,7 +812,8 @@ void Kernel::amx_gemm_blocking() {
 
 
 void Kernel::amx_gemm_compute() {
-    amx_gemm_blocking(); // launch AMX GEMM with L2 blocking
+    // amx_gemm_blocking(); // launch AMX GEMM with L2 blocking
+    amx_gemm_core_pure_loop();
 }
 
 
@@ -818,8 +831,8 @@ void KernelMT::init_kernel_per_thread(int tid, int core_id) {
         return;
     }
 
-    int blocks_m = CEIL(M, TM);
-    int blocks_n = CEIL(N, TN);
+    int blocks_m = ceil_div(M, TM);
+    int blocks_n = ceil_div(N, TN);
     int total_blocks = blocks_m * blocks_n;
     int num_threads = params.core_list.size();
 
@@ -830,7 +843,7 @@ void KernelMT::init_kernel_per_thread(int tid, int core_id) {
         
         // 在 Kernel_pool 中创建 Kernel 实例
         auto kernel_ptr = std::make_unique<Kernel>(
-            MIN(TM, M - bm), MIN(TN, N - bn), K,
+            min(TM, M - bm), min(TN, N - bn), K,
             lda, ldb, ldc,
             &A[OFFSET2D(bm, 0, lda)],
             &B[OFFSET2D(0, bn, ldb)],
@@ -847,8 +860,8 @@ void KernelMT::init_kernels() {
     std::vector<std::thread> threads;
     threads.reserve(num_threads);
 
-    int blocks_m = CEIL(M, TM);
-    int blocks_n = CEIL(N, TN);
+    int blocks_m = ceil_div(M, TM);
+    int blocks_n = ceil_div(N, TN);
     int total_blocks = blocks_m * blocks_n;
     kernel_pool.resize(total_blocks); // 调整 kernel_pool 大小以容纳所有线程的 Kernel 实例
 

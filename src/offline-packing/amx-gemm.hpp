@@ -14,7 +14,8 @@
 #include <thread>
 #include <optional>
 
-#include "../utils.hpp"
+#include "utils.hpp"
+#include "thread_params.hpp"
 
 #if (defined(_WIN32) || defined(_WIN64))
 #define RESTRICT __restrict
@@ -119,8 +120,8 @@ public:
     #define B0  6
     #define B1  7
     // cache blocking sizes
-    static constexpr int TM = 512;
-    static constexpr int TN = 512;
+    static constexpr int TM = 1024;
+    static constexpr int TN = 1024;
     static constexpr int TK = 1280;
 
     GEMMKernelInt8(int M, int N, int K,
@@ -350,7 +351,7 @@ private:
             if (get() == nullptr) { // no pack
                 return &context->A[OFFSET2D(tm, tk, lda)];
             } else {
-                return get() + tk * context->M + tm * MIN(context->K - tk, TK);
+                return get() + tk * context->M + tm * min(context->K - tk, TK);
             }
         }
 
@@ -369,7 +370,7 @@ private:
             if (get() == nullptr) { // no pack
                 return &context->B[OFFSET2D(tk, tn, ldb)];
             } else {
-                return get() + tk * context->N + tn * MIN(context->K - tk, TK);
+                return get() + tk * context->N + tn * min(context->K - tk, TK);
             }
         }
 
@@ -390,9 +391,9 @@ private:
                 return &context->C[OFFSET2D(tm, tn, ldc)];
             } else {
                 if (context->M >= context->N) {
-                    return get() + tn * context->M + tm * MIN(context->N - tn, TN);
+                    return get() + tn * context->M + tm * min(context->N - tn, TN);
                 } else {
-                    return get() + tm * context->N + tn * MIN(context->M - tm, TM);
+                    return get() + tm * context->N + tn * min(context->M - tm, TM);
                 }
             }
         }
@@ -424,6 +425,7 @@ private:
     void amx_gemm_naive(taskSize *task = nullptr);
 
     void amx_gemm_core(taskSize *task = nullptr);
+    void amx_gemm_core_pure_loop(taskSize *task = nullptr);
     void amx_gemm_core_packB(taskSize *task = nullptr);
     void amx_gemm_core_packAB_v1(taskSize *task = nullptr);
     void amx_gemm_core_packAB_v2(taskSize *task = nullptr);
@@ -485,12 +487,8 @@ private:
 
 };
 
-// Thread parameters for multi-threaded GEMM
-struct ThreadParams {
-    std::vector<int> core_list = {0};
-    bool numa_aware = false;
-    int num_numa_node = 1;
-};
+// Thread parameters for multi-threaded GEMM: 见 common/thread_params.hpp
+// (与 bench_harness.hpp 共用同一定义)
 
 
 // AMX GEMM Kernel for int8 on multi-threads

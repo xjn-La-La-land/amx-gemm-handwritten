@@ -2,7 +2,7 @@
 
 这里 large 与 small 的划分是相对于 Tile 分块大小而言的，而 Tile 分块大小又是根据片上 SRAM（也就是 CPU 的 cache）大小来确定的。
 
-<img src="../pics/GEMM-tree.PNG" alt="img" style="zoom:50%;" />
+<img src="../../pics/GEMM-tree.PNG" alt="img" style="zoom:50%;" />
 
 我们对数据的分块命名规则是这样的：
 
@@ -21,7 +21,7 @@
 
     每一个 GESB kernel 计算的所有数据都在 SRAM 中（StripA/C 在 L1，BlockB 在 L2），中间不需要与 L3/DDR 交换数据。
 
-    ![img](../pics/Routine1.png) 
+    ![img](../../pics/Routine1.png) 
 
 2. **Routine2: GEMM => GEPP => GEBP => GEBS**
 
@@ -29,18 +29,18 @@
 
     同样，每一个 GEBS kernel 计算的所有数据都在 SRAM 中（StripB/C 在 L1，BlockA 在 L2），中间不需要与 L3/DDR 交换数据。
 
-    ![img](../pics/Routine2.png) 
+    ![img](../../pics/Routine2.png) 
 
 3. Routine3: GEMM => micro-kernel （仅在 GEPDOT 情形下退化）
 
-    ![img](../pics/Routine3.png) 
+    ![img](../../pics/Routine3.png) 
 
 ## Pack/Unpack 策略
 
 - Pack: 对分块数据重排，使其在内存中连续排列；
 - Unpack: 将连续排列的分块数据按照原始 layout 写回内存。
 
-我们对分块数据 Pack/Unpack 的原则是**避免对同一****块数据****重复进行 Pack/Unpack。**这样 Pack/Unpack 的总数据量就是整个矩阵的大小。
+我们对分块数据 Pack/Unpack 的原则是**避免对同一块数据重复进行 Pack/Unpack。** 这样 Pack/Unpack 的总数据量就是整个矩阵的大小。
 
 在这个基础上，我们可以考虑 Pack/Unpack 相对于矩阵乘计算的开销：
 
@@ -159,8 +159,8 @@ unpack matrixC from buffer
 
 GEMM 下 ABC 全部做 packing/unpacking，每一部分的开销变化
 
-![img](../pics/stage-breakdown.png)
+![img](../../pics/stage-breakdown.png)
 
 M=N=K，对比 GEMM/GEPP/GEPB 三种实现策略的性能
 
-![img](../pics/amx-util-vs-mnk.png) 
+![img](../../pics/amx-util-vs-mnk.png) 
