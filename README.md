@@ -6,44 +6,74 @@
 
 ## 性能测试方法
 
-1. `make`生成BIN文件`build/gemm-test`
+1. 用 **CMake** 构建（顶层统一配置，两个变体一起编译）：
+
+   `````bash
+   cmake -S . -B build      # 配置一次，顺带生成 compile_commands.json（供 clangd）
+   cmake --build build -j   # 编译
+   `````
+
+   产物：
+
+   - `build/gemm-offline` --- 离线预打包版本（计时前一次性 pack 整个 A/B/C）
+   - `build/gemm-online` --- 在线打包版本（打包融合进计算循环）
 
 2. 可以从命令行传入一些参数，用来控制性能测试条件，或者控制GEMM算子的行为
 
    `````
    AMX GEMM Performance Test
-   Usage: ./build/gemm-test [OPTIONS]
+   Usage: ./build/gemm-<variant> [OPTIONS]
    
    Options:
      -h,--help                   Print this help message and exit
+     --config TEXT               从 TOML/INI 文件读取选项(CLI 可覆盖文件)
      -n,--node INT               Number of NUMA nodes
      -l,--core-list INT ...      Core list (e.g., 0,1,2,3)
      -f,--freq FLOAT             CPU Frequency in kHz
      -r,--round INT              Loop count
-     --no-hwpf                   Disable HW Prefetcher
-     --no-packA{false}           Disable packing for matrix A
-     --no-packB{false}           Disable packing for matrix B
-     --no-packC{false}           Disable packing for matrix C
-     --no-swpfA{false}           Disable software prefetch for matrix A
-     --no-swpfB{false}           Disable software prefetch for matrix B
-     --no-swpfC{false}           Disable software prefetch for matrix C
-     -o,--output TEXT            Output log file path
+     --no-hwpf                   关闭硬件预取器(默认开启)
+     --no-packA/B/C{false}       Disable packing for matrix A/B/C
+     --dim-m/--dim-n/--dim-k TEXT  尺寸 sweep: 标量(1024)或区间(start:end:step)
+     -o,--output TEXT            输出 CSV 日志路径
    `````
 
-3. 也可以用我们在Makefile中写好的脚本：
+   sweep 三维 zip: 标量重复对齐最长维,多个区间须等长。例:
+   `--dim-m 512:16384:256 --dim-n 512:16384:256 --dim-k 512:16384:256`(方阵),
+   或 `--dim-m 32 --dim-n 32 --dim-k 64:4096:64`(固定 MN、扫 K)。
 
-   1. `make lockfreq`/`make unlockfreq`使用**cpupower**工具来控制所有核心的频率。
+   两个变体各有专属参数：`gemm-offline` 额外有 `--no-swpfA/B/C`（关软件预取）；
+   `gemm-online` 额外有 `--MC/--NC/--KC`（调 cache blocking）和 `--profile-single`（分阶段计时，额外输出 `*-stages.csv`）。
 
-   2. `make run`会先锁定所有核心的频率，然后通过**taskset**将测试绑定在选定的CPU核上，测试结束会释放所有核心的频率。可以传入这些参数：
+   输出为 **CSV**（默认 `gemm-i8-<核数>core.csv`，含表头 + 完整 config 列），
+   可直接用 pandas 读取，也可交给 `tools/plot_*.py` 绘图。
 
-      - CORE=0; CORE=0,1,2; CORE=0-15 --- 选择CPU核心
-      - FREQ=3000000 --- 设定测试运行频率（单位KHz）
-      - LOOP=1000 --- 设定测试运行次数
-      - e.g. `make run CORE=0 FREQ=3000000 LOOP=1000`
+3. 跑测试统一用 `scripts/bench.sh`（它负责锁频 + 绑核 + perf，并用 trap 保证测试结束/中断/失败后频率一定被解锁）。
 
-   3. `make perf`在`make run`基础上，通过**perf**工具统计相关性能计数器的值。统计的性能计数事件在**$(PERFFLAGS)**中，可以在其中添加想要统计的事件。不过由于硬件性能计数器数量有限，建议同时统计2~4个事件。
+   **关注点分离**：所有实验参数（freq/cores/dim/pack/MC…）写在一份 **TOML** 里，binary 与 bench.sh 共享；
+   bench.sh 自己的 CLI 只留编排项（选变体/模式/perf 事件）。参考模板 [bench.toml](bench.toml)。
 
-      下面有一些比较有用的perf事件：
+   `````bash
+   # 编辑 bench.toml 设定 freq / cores / round / dim-* 等，然后:
+   scripts/bench.sh -v online  --config bench.toml            # 按 TOML 跑
+   scripts/bench.sh -v offline --config bench.toml -m perf    # 加 perf stat
+   scripts/bench.sh -v online  --config bench.toml --dry-run  # 只预览命令
+   scripts/bench.sh -v online  --config bench.toml -- -r 5    # -- 后临时覆盖 binary 参数
+   `````
+
+   bench.sh 的 CLI 选项（编排层）：
+
+   - `-v, --variant offline|online` --- 选哪个可执行文件（必需）
+   - `--config <toml>` --- 实验参数文件（必需）
+   - `-m, --mode run|perf` --- `perf` 会在 `run` 基础上挂 **perf** 统计性能计数器
+   - `--no-lock` / `--no-sudo` / `--dry-run` --- 分别跳过锁频 / 不加 sudo / 只打印不执行
+
+   TOML 里 bench.sh 关心的键：`freq`（kHz，锁频用，与 binary 算利用率同源）、
+   `cores`（核规格，支持 `"0-7"`）、`node`（可选，设了走 numactl）、
+   `events`（perf 事件**数组**，如 `["cycles", "instructions"]`，不用重复写 `-e`）。其余键都是 binary 的实验参数。
+
+   频率的单独锁定/解锁也可直接用 `scripts/freq.sh lock <khz>` 和 `scripts/freq.sh unlock`（底层是 **cpupower**）。
+
+   perf 事件用 `-e` 传入。不过由于硬件性能计数器数量有限，建议同时统计 2~4 个事件。下面有一些比较有用的perf事件：
 
       `````
       -e cycles -e instruction
