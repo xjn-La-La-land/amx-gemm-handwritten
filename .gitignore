@@ -1,2 +1,11 @@
 build
 *.txt
+*.csv
+!CMakeLists.txt
+compile_commands.json
+
+# 生成的绘图产物(plot_*.py 输出到脚本旁 / cwd)
+tools/*.png
+tools/*.pdf
+amx-util-vs-mnk.png
+stage-breakdown.png
