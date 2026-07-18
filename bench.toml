@@ -1,0 +1,35 @@
+# AMX GEMM 实验参数模板。用法:
+#   scripts/bench.sh -v online --config bench.toml
+# binary 直接读本文件(--config); bench.sh 也从这里读 freq(锁频)与 cores/node(绑核)。
+# 键名 = binary 的长选项名(去掉 --)。CLI 参数可临时覆盖本文件。
+
+# ---- bench.sh 与 binary 共享 ----
+freq  = 3000000        # kHz
+
+# ---- bench.sh 专属(binary 靠 allow_config_extras 忽略这些键)----
+cores = "0"            # 核规格, 支持 "0" / "0,1,2" / "0-15"; bench.sh 展开后转发给 binary
+# node = 2             # (可选) NUMA 节点数; 取消注释则走 numactl, 忽略 cores
+
+# perf 事件(数组, 不用重复写 -e)。仅 `-m perf` 时用。
+events = ["cycles", "instructions", "MEM_LOAD_RETIRED.L1_HIT", "MEM_LOAD_RETIRED.L1_MISS"]
+# 更多事件见 README / scripts/bench.sh 顶部注释; 硬件计数器有限, 建议一次 2~4 个。
+
+# ---- binary 实验参数 ----
+round = 100            # 计时循环次数
+# no-hwpf = true       # 关闭硬件预取器(默认开启)
+# no-packA = true      # 关掉 A 的 packing(B/C 同理)
+
+# 尺寸 sweep: 标量或 "start:end:step"(含端点)。三维 zip, 标量重复对齐最长维。
+dim-m = "512:16384:256"
+dim-n = "512:16384:256"
+dim-k = "512:16384:256"
+
+# ---- online 专属(cache blocking)----
+MC = 512
+NC = 512
+KC = 1280
+
+# ---- offline 专属(软件预取; 取消注释以关闭)----
+# no-swpfA = true
+# no-swpfB = true
+# no-swpfC = true
