@@ -22,7 +22,7 @@ round = 100            # 计时循环次数
 # 尺寸 sweep: 标量或 "start:end:step"(含端点)。三维 zip, 标量重复对齐最长维。
 dim-m = "512:16384:256"
 dim-n = "512:16384:256"
-dim-k = "512:16384:256"
+dim-k = "1280"
 
 # ---- online 专属(cache blocking)----
 MC = 512

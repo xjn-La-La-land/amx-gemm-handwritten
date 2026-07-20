@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
 # bench.sh —— AMX GEMM 基准测试编排(取代原 Makefile 的 run/perf/run-N-node)。
 #
-# 关键改进: 用 trap 保证无论测试成功、失败还是被 Ctrl-C 中断, 频率一定被解锁 ——
-# 原 Makefile 中 binary 非零退出会跳过 unlockfreq, 导致 CPU 卡在锁定频率。
-#
-# 关注点分离:
-#   实验参数(freq/cores/node/round/dim/pack/MC…) 全部写在 --config 的 TOML 里,
-#   binary 直接读该 TOML; bench.sh 也从同一 TOML 读 freq(锁频)、cores/node(绑核)。
-#   bench.sh 自己的 CLI 只留"编排"参数(选变体/模式/perf 事件…)。
+# 用 trap 保证无论测试成功、失败还是被 Ctrl-C 中断, 频率一定被解锁
 #
 # 用法:
 #   scripts/bench.sh -v <offline|online> --config <toml> [选项] [-- <透传给 gemm 的额外参数>]
@@ -17,7 +11,7 @@
 #       --config    实验参数 TOML 文件            (必需)
 #   -m, --mode      run | perf                   (默认 run; perf 挂 perf stat)
 #       --build-dir CMake 构建目录                (默认 build)
-#       --no-lock   跳过锁频(不改系统频率)
+#       --no-lock   不锁定系统频率
 #       --no-sudo   binary 不加 sudo(则无法关硬件预取器/读 MSR)
 #       --dry-run   只打印将执行的命令, 不实际运行
 #   -h, --help
