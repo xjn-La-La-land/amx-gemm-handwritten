@@ -402,125 +402,133 @@ void Kernel::cpu_gemm_ref() {
   }
 }
 
-// Heuristic selection of different kernel routines based on matrix shapes and
-// parameters
-void Kernel::find_best_routine() {
-  // int8_t magic_number = large_enough_m() << 2 | large_enough_n() << 1 |
-  // large_enough_k();
-  int8_t magic_number = 0b100;
-  switch (magic_number) {
-  case 0b111: // large M, N, K
-    compute_func = &Kernel::GEMM_;
-    if (M >= N) {
-      routine = KernelRoutine::Routine1_GEPB;
-      bufA.allocate_dense(M, KC, PackDirection::RowMajor);  // panel A
-      bufB.allocate_dense(KC, NC, PackDirection::ColMajor); // block B
-      bufC.allocate_dense(M, N, PackDirection::ColMajor);   // matrix C
-    } else {
-      routine = KernelRoutine::Routine2_GEBP;
-      bufA.allocate_dense(MC, KC, PackDirection::RowMajor); // block A
-      bufB.allocate_dense(KC, N, PackDirection::ColMajor);  // panel B
-      bufC.allocate_dense(M, N, PackDirection::RowMajor);   // matrix C
-    }
-    break;
-  case 0b110: // large M, N, small K
-    compute_func = &Kernel::GEPP_;
-    if (M >= N) {
-      routine = KernelRoutine::Routine1_GEPB;
-      bufA.allocate_dense(M, KC, PackDirection::RowMajor);  // panel A
-      bufB.allocate_dense(KC, NC, PackDirection::ColMajor); // block B
-    } else {
-      routine = KernelRoutine::Routine2_GEBP;
-      bufA.allocate_dense(MC, KC, PackDirection::RowMajor); // block A
-      bufB.allocate_dense(KC, N, PackDirection::ColMajor);  // panel B
-    }
-    break;
-  case 0b101: // large M, K, small N
-    compute_func = &Kernel::GEMP_;
-    routine = KernelRoutine::Routine1_GEPB;
-    bufB.allocate_dense(KC, NC, PackDirection::ColMajor); // block B
-    bufC.allocate_dense(M, N, PackDirection::ColMajor);   // matrix C
-    break;
-  case 0b100: // large M, small N, K
-    compute_func = &Kernel::GEPB_;
-    routine = KernelRoutine::Routine1_GEPB;
-    bufB.allocate_dense(KC, NC, PackDirection::ColMajor); // block B
-    break;
-  case 0b011: // large N, K, small M
-    compute_func = &Kernel::GEPM_;
-    routine = KernelRoutine::Routine2_GEBP;
-    bufA.allocate_dense(MC, KC, PackDirection::RowMajor); // block A
-    bufB.allocate_dense(KC, N, PackDirection::ColMajor);  // panel B
-    bufC.allocate_dense(M, N, PackDirection::RowMajor);   // matrix C
-    break;
-  case 0b010: // large N, small M, K
-    compute_func = &Kernel::GEBP_;
-    routine = KernelRoutine::Routine2_GEBP;
-    bufA.allocate_dense(MC, KC, PackDirection::RowMajor); // block A
-    bufB.allocate_dense(KC, N, PackDirection::ColMajor);  // panel B
-    break;
-  case 0b001: // large K, small M, N
-    compute_func = &Kernel::GEPDOT_;
-    routine = KernelRoutine::Routine3_GEPDOT;
-    bufB.allocate_dense(K, N, PackDirection::ColMajor); // whole matrix B
-    bufC.allocate_dense(M, N, PackDirection::ColMajor); // whole matrix C
-    break;
-  default: // small M, N, K
-    compute_func = &Kernel::GEPB_;
-    routine = KernelRoutine::Routine1_GEPB;               // default routine
-    bufB.allocate_dense(KC, NC, PackDirection::ColMajor); // block B
-    break;
+// Heuristic selection of different kernel routines based on matrix shapes.
+void Kernel::select_kernel() {
+
+  struct KernelSpec {
+    FuncPtr kernel;
+    const char *name;
+    bool packA, packB, packC;
+  };
+  // clang-format off
+  static const KernelSpec KERNEL_SPECS[] = {
+    /* kernel           name      packA  packB  packC */
+    { &Kernel::GEMM_,   "GEMM",   true,  true,  true  },
+    { &Kernel::GEPP_,   "GEPP",   true,  true,  false },
+    { &Kernel::GEMP_,   "GEMP",   false, true,  true  },
+    { &Kernel::GEPB_,   "GEPB",   false, true,  false },
+    { &Kernel::GEPM_,   "GEPM",   true,  true,  true  },
+    { &Kernel::GEBP_,   "GEBP",   true,  true,  false },
+    { &Kernel::GEPDOT_, "GEPDOT", false, true,  true  },
+  };
+  // clang-format on
+  // 按 kernel 指针反查其固有属性(建 kernel 时跑一次, 非热路径, 线性扫足够)。
+  auto spec_of = [&](FuncPtr k) -> const KernelSpec * {
+    for (const auto &s : KERNEL_SPECS)
+      if (s.kernel == k) return &s;
+    return nullptr;
+  };
+
+  if (params.kernel != nullptr &&
+      params.loop_order != LoopOrder::NONE) {
+    // manual select: 直接使用用户指定的 kernel + loop order
+    selected_kernel = params.kernel;
+    selected_loop_order = params.loop_order;
+  } else {
+    // auto select: 按形状 magic 选 kernel(shape → kernel), 再由 kernel(+ M≥N)定 loop order
+    // clang-format off
+    static const FuncPtr SHAPE_TABLE[8] = {
+      /* 000 small M,N,K */ &Kernel::GEPB_,
+      /* 001 large K     */ &Kernel::GEPDOT_,
+      /* 010 large N     */ &Kernel::GEBP_,
+      /* 011 large N,K   */ &Kernel::GEPM_,
+      /* 100 large M     */ &Kernel::GEPB_,
+      /* 101 large M,K   */ &Kernel::GEMP_,
+      /* 110 large M,N   */ &Kernel::GEPP_,
+      /* 111 large M,N,K */ &Kernel::GEMM_,
+    };
+    // clang-format on
+    // uint8_t magic = 0b100;
+    uint8_t magic = large_enough_m() << 2 | large_enough_n() << 1 | large_enough_k();
+    selected_kernel = SHAPE_TABLE[magic];
+
+    // select loop order
+    if (selected_kernel == &Kernel::GEMM_ || selected_kernel == &Kernel::GEPP_)
+      selected_loop_order = (M >= N) ? LoopOrder::KN_GEPB : LoopOrder::KM_GEBP;
+    else if (selected_kernel == &Kernel::GEPB_ || selected_kernel == &Kernel::GEMP_)
+      selected_loop_order = LoopOrder::KN_GEPB;
+    else if (selected_kernel == &Kernel::GEBP_ || selected_kernel == &Kernel::GEPM_)
+      selected_loop_order = LoopOrder::KM_GEBP;
+    else if (selected_kernel == &Kernel::GEPDOT_)
+      selected_loop_order = LoopOrder::MN_GEPDOT;
   }
 
-  // std::cout << "Selected Kernel Routine: \n";
-  // if (routine == KernelRoutine::Routine1_GEPB) std::cout <<
-  // routine_graphs[0]; else if (routine == KernelRoutine::Routine2_GEBP)
-  // std::cout << routine_graphs[1]; else if (routine ==
-  // KernelRoutine::Routine3_GEPDOT) std::cout << routine_graphs[2];
+  const KernelSpec *spec = spec_of(selected_kernel);
+  if (!spec) {
+    std::cerr << "[Error] select_kernel: unknown kernel pointer\n";
+    std::abort();
+  }
+  kernel_name_ = spec->name;
+  // 分配 buffer 空间
+  switch (selected_loop_order) {
+  case LoopOrder::KN_GEPB: // R1: panel A(M×KC) / block B(KC×NC) / matrix C(ColMajor)
+    if (spec->packA) bufA.allocate_dense(M, KC, PackDirection::RowMajor);
+    if (spec->packB) bufB.allocate_dense(KC, NC, PackDirection::ColMajor);
+    if (spec->packC) bufC.allocate_dense(M, N, PackDirection::ColMajor);
+    break;
+  case LoopOrder::KM_GEBP: // R2: block A(MC×KC) / panel B(KC×N) / matrix C(RowMajor)
+    if (spec->packA) bufA.allocate_dense(MC, KC, PackDirection::RowMajor);
+    if (spec->packB) bufB.allocate_dense(KC, N, PackDirection::ColMajor);
+    if (spec->packC) bufC.allocate_dense(M, N, PackDirection::RowMajor);
+    break;
+  case LoopOrder::MN_GEPDOT: // R3: whole B(K×N) / matrix C(ColMajor); A 走 strided 不 pack
+    if (spec->packB) bufB.allocate_dense(K, N, PackDirection::ColMajor);
+    if (spec->packC) bufC.allocate_dense(M, N, PackDirection::ColMajor);
+    break;
+  case LoopOrder::NONE:
+    break;
+  }
 }
 
+
 void Kernel::pack_A() {
-  if (routine == KernelRoutine::Routine1_GEPB ||
-      routine == KernelRoutine::Routine2_GEBP) {
+  if (selected_loop_order == LoopOrder::KN_GEPB || selected_loop_order == LoopOrder::KM_GEBP) {
     bufA.pack_from(A, lda, KC); // 3D packing whole matrix A
-  } else if (routine == KernelRoutine::Routine3_GEPDOT) {
-    bufA.pack_from(A,
-                   lda); // 2D packing panel/block A, no 3D packing for GEPDOT
+  } else if (selected_loop_order == LoopOrder::MN_GEPDOT) {
+    bufA.pack_from(A, lda); // 2D packing panel/block A, no 3D packing for GEPDOT
   }
 }
 
 void Kernel::pack_B() {
-  if (routine == KernelRoutine::Routine1_GEPB ||
-      routine == KernelRoutine::Routine2_GEBP) {
+  if (selected_loop_order == LoopOrder::KN_GEPB || selected_loop_order == LoopOrder::KM_GEBP) {
     bufB.pack_from(B, ldb, KC); // 3D packing whole matrix B
-  } else if (routine == KernelRoutine::Routine3_GEPDOT) {
-    bufB.pack_from(B,
-                   ldb); // 2D packing panel/block B, no 3D packing for GEPDOT
+  } else if (selected_loop_order == LoopOrder::MN_GEPDOT) {
+    bufB.pack_from(B, ldb); // 2D packing panel/block B, no 3D packing for GEPDOT
   }
 }
 
 void Kernel::unpack_C() {
-  if (routine == KernelRoutine::Routine1_GEPB ||
-      routine == KernelRoutine::Routine2_GEBP) {
+  if (selected_loop_order == LoopOrder::KN_GEPB ||
+      selected_loop_order == LoopOrder::KM_GEBP) {
     bufC.unpack_to(C, ldc, params.beta == 0.0f ? false : true,
                    bufC.direction() == PackDirection::RowMajor ? MC : NC);
-  } else if (routine == KernelRoutine::Routine3_GEPDOT) {
+  } else if (selected_loop_order == LoopOrder::MN_GEPDOT) {
     bufC.unpack_to(C, ldc, params.beta == 0.0f ? false : true);
   }
 }
 
-// 重新分配 packed buffer 给整个矩阵 A, B, C，并进行数据打包
+// 分配 packed buffer 给整个矩阵 A, B, C，并进行整个矩阵的 packing/unpacking
 void Kernel::alloc_buffers() {
   PackDirection dirA, dirB, dirC;
-  if (routine == KernelRoutine::Routine1_GEPB) {
+  if (selected_loop_order == LoopOrder::KN_GEPB) {
     dirA = PackDirection::ColMajor;
     dirB = PackDirection::RowMajor;
     dirC = PackDirection::ColMajor;
-  } else if (routine == KernelRoutine::Routine2_GEBP) {
+  } else if (selected_loop_order == LoopOrder::KM_GEBP) {
     dirA = PackDirection::ColMajor;
     dirB = PackDirection::RowMajor;
     dirC = PackDirection::RowMajor;
-  } else if (routine == KernelRoutine::Routine3_GEPDOT) {
+  } else if (selected_loop_order == LoopOrder::MN_GEPDOT) {
     dirA = PackDirection::RowMajor;
     dirB = PackDirection::ColMajor;
     dirC = PackDirection::ColMajor;
@@ -557,7 +565,7 @@ void Kernel::GEMM_compute() {
     return;
   }
 
-  if (routine == KernelRoutine::Routine1_GEPB) {
+  if (selected_loop_order == LoopOrder::KN_GEPB) {
     int8_t *A_ptr = bufA.data();
     int8_t *B_ptr = bufB.data();
     GEPBKernelConfig cfg;
@@ -580,7 +588,7 @@ void Kernel::GEMM_compute() {
       }
       A_ptr += panelA.size();
     }
-  } else if (routine == KernelRoutine::Routine2_GEBP) {
+  } else if (selected_loop_order == LoopOrder::KM_GEBP) {
 
     int8_t *A_ptr = bufA.data();
     int8_t *B_ptr = bufB.data();
@@ -601,7 +609,7 @@ void Kernel::GEMM_compute() {
       }
       B_ptr += panelB.size();
     }
-  } else if (routine == KernelRoutine::Routine3_GEPDOT) {
+  } else if (selected_loop_order == LoopOrder::MN_GEPDOT) {
 
     int32_t *C_ptr = bufC.data();
     for (int j = 0; j < N; j += NR) {
@@ -627,11 +635,11 @@ void Kernel::GEMM_compute() {
   }
 }
 
-void Kernel::GEMM() { (this->*compute_func)(); }
+void Kernel::GEMM() { (this->*selected_kernel)(); }
 
 // large M, large N, large K
 void Kernel::GEMM_() {
-  if (routine == KernelRoutine::Routine1_GEPB) {
+  if (selected_loop_order == LoopOrder::KN_GEPB) {
     assert(bufA.valid() && bufB.valid() && bufC.valid());
     GEPBKernelConfig cfg;
 
@@ -658,7 +666,7 @@ void Kernel::GEMM_() {
     unpack_C();
   }
 
-  else if (routine == KernelRoutine::Routine2_GEBP) {
+  else if (selected_loop_order == LoopOrder::KM_GEBP) {
     assert(bufA.valid() && bufB.valid() && bufC.valid());
 
     for (int kc = 0; kc < K; kc += KC) {
@@ -689,7 +697,7 @@ void Kernel::GEMM_() {
 
 // large M, large N, small K
 void Kernel::GEPP_() {
-  if (routine == KernelRoutine::Routine1_GEPB) {
+  if (selected_loop_order == LoopOrder::KN_GEPB) {
     assert(bufA.valid() && bufB.valid());
     assert(!bufC.valid()); // no buffer for C
 
@@ -715,7 +723,7 @@ void Kernel::GEPP_() {
 
   }
 
-  else if (routine == KernelRoutine::Routine2_GEBP) {
+  else if (selected_loop_order == LoopOrder::KM_GEBP) {
     assert(bufA.valid() && bufB.valid());
     assert(!bufC.valid()); // no buffer for C
 
@@ -741,7 +749,7 @@ void Kernel::GEPP_() {
 
 // large M, small N, large K
 void Kernel::GEMP_() {
-  assert(routine == KernelRoutine::Routine1_GEPB);
+  assert(selected_loop_order == LoopOrder::KN_GEPB);
   assert(!bufA.valid());                // no buffer for A
   assert(bufB.valid() && bufC.valid()); // block B and matrix C are packed
 
@@ -770,13 +778,13 @@ void Kernel::GEMP_() {
 
 // small M, large N, large K
 void Kernel::GEPM_() {
-  assert(routine == KernelRoutine::Routine2_GEBP);
+  assert(selected_loop_order == LoopOrder::KM_GEBP);
   GEMM_();
 }
 
 // large M, small N, small K
 void Kernel::GEPB_() {
-  assert(routine == KernelRoutine::Routine1_GEPB);
+  assert(selected_loop_order == LoopOrder::KN_GEPB);
   assert(!bufA.valid()); // no buffer for A
   assert(bufB.valid());  // block B is packed
   assert(!bufC.valid()); // no buffer for C
@@ -803,12 +811,13 @@ void Kernel::GEPB_() {
 
 // small M, large N, small K
 void Kernel::GEBP_() {
-  assert(routine == KernelRoutine::Routine2_GEBP);
+  assert(selected_loop_order == LoopOrder::KM_GEBP);
   GEPP_();
 }
 
+// small M, small N, large K
 void Kernel::GEPDOT_() {
-  assert(routine == KernelRoutine::Routine3_GEPDOT);
+  assert(selected_loop_order == LoopOrder::MN_GEPDOT);
   assert(!bufA.valid());                // no buffer for A
   assert(bufB.valid() && bufC.valid()); // matrix B and matrix C are packed
 
@@ -1281,7 +1290,7 @@ void KernelMT::init_kernel_per_thread(int tid, int core_id) {
     auto kernel_ptr = std::make_unique<Kernel>(
         min(MC, M - bm), min(NC, N - bn), K, lda, ldb, ldc,
         &A[OFFSET2D(bm, 0, lda)], &B[OFFSET2D(0, bn, ldb)],
-        &C[OFFSET2D(bm, bn, ldc)], gemm_params, BlockingConfig(MC, NC, KC));
+        &C[OFFSET2D(bm, bn, ldc)], gemm_params);
 
     kernel_pool[block_id] = std::move(kernel_ptr);
   }

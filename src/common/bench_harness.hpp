@@ -12,10 +12,13 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #define LINE "-------------------------------------------------------------------\n"
@@ -27,7 +30,19 @@
 //   GEMMPlan() 每调一次执行一次 compute(捕获已建好的 kernel)。
 // 计时循环只调 GEMMPlan, 故 setup 开销不计入。
 // ============================================================================
-using GEMMPlan = std::function<void()>;
+// GEMMPlan: 被计时的纯 compute 回调 + 该 shape 选中的 kernel 名(仅写入 CSV, 不进终端表格)。
+// kernel_name 留空则 CSV 该列为空(如 offline 版本 / 多核 MT 暂未实现命名)。
+struct GEMMPlan {
+    std::function<void()> run;  // compute kernel 调用
+    std::shared_ptr<void> info; // kernel 相关信息
+
+    GEMMPlan() = default;
+    // 从任意无参可调用对象构造(lambda 可直接转换), 可选带自定义 info 载体。
+    template <typename F,
+              typename = std::enable_if_t<std::is_invocable_v<F>>>
+    GEMMPlan(F&& f, std::shared_ptr<void> info = nullptr)
+        : run(std::forward<F>(f)), info(std::move(info)) {}
+};
 using GEMMPlanner = std::function<GEMMPlan(
     int M, int N, int K,
     const int8_t* A, const int8_t* B, int32_t* C)>;
@@ -162,6 +177,9 @@ public:
     BenchConfig cfg;
     OperandInit init_operands = fill_ones;   // A/B/C 初始化回调; 可在 configure 后覆盖
 
+    std::string info_columns; // 额外 CSV 列的表头
+    std::function<std::string(const std::shared_ptr<void>&)> info_serialize; // 把某个 plan 的 info 序列化成对应的一行值
+
     PerformanceTester() = default;
 
     ~PerformanceTester() {
@@ -191,7 +209,9 @@ public:
         for (const Dims& d : build_sweep(cfg.dim_m, cfg.dim_n, cfg.dim_k)) {
             Operands op = make_operands(d.M, d.N, d.K);
             GEMMPlan plan = planner(d.M, d.N, d.K, op.A.get(), op.B.get(), op.C.get());
-            report_performance(d.M, d.N, d.K, measure(plan));
+            std::string info_row = (info_serialize && plan.info) ? info_serialize(plan.info)
+                                                                 : std::string();
+            report_performance(d.M, d.N, d.K, measure(plan.run), info_row);
         }
     }
 
@@ -282,8 +302,12 @@ private:
             std::cerr << "Failed to open log file: " << cfg.log_filename << "\n";
             std::abort();
         }
-        if (fresh)
-            log_file << "M,N,K,time_s,tops,util_pct,cores,freq_khz,packA,packB,packC,hwpf\n";
+        if (fresh) {
+            // pack 是 GEMM 专属概念, 不由 harness 硬编码; 变体经 info_columns 自行注册。
+            log_file << "M,N,K,time_s,tops,util_pct,cores,freq_khz,hwpf";
+            if (!info_columns.empty()) log_file << "," << info_columns;
+            log_file << "\n";
+        }
     }
 
     void report_params(std::function<void()> print_extra_params) {
@@ -292,9 +316,6 @@ private:
                   << cfg.thread_params.core_list.size() << " CPU Cores, "
                   << "at " << std::fixed << std::setprecision(2)
                   << cfg.frequency_khz / 1e6 << " GHz!\n";
-        std::cout << "Matrix Layout: A - " << (cfg.packA ? "packed" : "normal") << ", "
-                  << "B - " << (cfg.packB ? "packed" : "normal") << ", "
-                  << "C - " << (cfg.packC ? "packed" : "normal") << "\n";
         std::cout << "Prefetch Options:\n";
         std::cout << "  Hardware Prefetchers: " << (cfg.hwpf_enabled ? "On" : "Off") << "\n";
         if (print_extra_params) print_extra_params();
@@ -323,27 +344,33 @@ private:
     }
 
     // ---- CSV 数据行(自描述: 含完整 config)----
-    void write_log(int M, int N, int K, double s, double tops, double util) {
+    // info_row: 变体注册的 info_serialize 产出的一行(逗号分隔), 追加在核心列之后;
+    void write_log(int M, int N, int K, double s, double tops, double util,
+                   const std::string& info_row) {
         log_file << M << "," << N << "," << K << ","
                  << std::fixed << std::setprecision(6) << s << ","
                  << std::setprecision(4) << tops << ","
                  << std::setprecision(2) << (util * 100.0) << ","
                  << cfg.thread_params.core_list.size() << ","
                  << std::setprecision(0) << cfg.frequency_khz << ","
-                 << cfg.packA << "," << cfg.packB << "," << cfg.packC << ","
-                 << cfg.hwpf_enabled << "\n";
+                 << cfg.hwpf_enabled;
+        if (!info_row.empty())
+            log_file << "," << info_row;
+
+        log_file << "\n";
         log_file.flush();
     }
 
-    void report_performance(int M, int N, int K, double elapsed_seconds) {
+    void report_performance(int M, int N, int K, double elapsed_seconds,
+                            const std::string& info_row) {
         uint64_t mac_count = (uint64_t)M * N * K * cfg.loop_count;
         double tops = (double)mac_count * 2.0 / 1e12 / elapsed_seconds;
         // AMX int8 理论峰值: 1024 MACs/cycle/core
         double ideal_tops = 1024.0 * cfg.thread_params.core_list.size()
                           * cfg.frequency_khz * 1000.0 * 2 / 1e12;
         double utilization = tops / ideal_tops;
-        print_data_row(M, N, K, elapsed_seconds, tops, utilization);
-        write_log(M, N, K, elapsed_seconds, tops, utilization);
+        print_data_row(M, N, K, elapsed_seconds, tops, utilization);   // 终端表格不含自定义列
+        write_log(M, N, K, elapsed_seconds, tops, utilization, info_row);
     }
 
     // ---- stage profile 输出: 独立 CSV(<log>-stages.csv) + 终端 ----
@@ -393,8 +420,8 @@ inline void test_correctness(int M, int N, int K,
     fill_random(42)(M, N, K, A.get(), B.get(), C1.get());  // 填 A/B 随机, C1=0
     std::fill_n(C2.get(), M * N, int32_t{0});              // C2 同样清零
 
-    amx_planner(M, N, K, A.get(), B.get(), C1.get())();
-    ref_planner(M, N, K, A.get(), B.get(), C2.get())();
+    amx_planner(M, N, K, A.get(), B.get(), C1.get()).run();
+    ref_planner(M, N, K, A.get(), B.get(), C2.get()).run();
 
     bool passed = true;
     for (int i = 0; i < M * N; i++) {

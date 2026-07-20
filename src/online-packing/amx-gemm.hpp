@@ -103,49 +103,54 @@ static constexpr int NR = MAX_ROWS * 2;
 static constexpr int KR = MAX_COLS_i8;
 
 
-// L2 / TLB / associativity 驱动的 cache blocking 大小
-struct BlockingConfig {
-    static constexpr int DEFAULT_MC = 512;
-    static constexpr int DEFAULT_NC = 512;
-    static constexpr int DEFAULT_KC = 1280;
 
-    int MC = DEFAULT_MC;
-    int NC = DEFAULT_NC;
-    int KC = DEFAULT_KC;
-
-    BlockingConfig(int mc, int nc, int kc) : MC(mc), NC(nc), KC(kc) {}
-    BlockingConfig() = default;
+// [Important!] We assume all matrices are in row-major order, as in C blas.
+enum class DataLayout { Strided, Dense };
+enum class PackDirection { RowMajor, ColMajor };
+// LoopOrder: marco-kernel 的循环嵌套顺序。8 种矩阵形状(GEMM/GEPP/GEMP/GEPB/GEPM/GEBP/GEPDOT)
+// 最终归纳到 3 种两级 loop 顺序, 每种以一个 Goto 叶子 micro-kernel 收尾。
+enum class LoopOrder {
+    KN_GEPB,    // for k { for n { GEPB   } }
+    KM_GEBP,    // for k { for m { GEBP   } }
+    MN_GEPDOT,  // for m { for n { GEPDOT } }
+    NONE,
 };
+// loop 嵌套的可读描述, 供日志/调试打印
+inline const char* loop_order_str(LoopOrder lo) {
+    switch (lo) {
+        case LoopOrder::KN_GEPB:   return "for k { for n { GEPB } }";
+        case LoopOrder::KM_GEBP:   return "for k { for m { GEBP } }";
+        case LoopOrder::MN_GEPDOT: return "for m { for n { GEPDOT } }";
+    }
+    return "unknown";
+}
+
+
+class GEMMKernelInt8; // 前置声明: GEMMParams::FuncPtr 需要它
 
 // parameter structure for GEMM kernel
 struct GEMMParams {
     float alpha = 1.0f;
     float beta = 1.0f;
-    // Data layout
-    bool packA = true;
-    bool packB = true;
-    bool packC = true;
+    // L2 / TLB / associativity 驱动的 cache blocking 大小
+    int MC = 512;
+    int NC = 512;
+    int KC = 1280;
+    // manual kernel selection
+    using FuncPtr = void (GEMMKernelInt8::*)();
+    FuncPtr kernel = nullptr;
+    LoopOrder loop_order = LoopOrder::NONE;
 };
 
-// [Important!] We assume all matrices are in row-major order, as in C blas.
-enum class DataLayout { Strided, Dense };
-enum class PackDirection { RowMajor, ColMajor };
-// GEMM Kernel Routine
-// Routine 1: GEMM => GEPP => GEPB (最终规约到 GEPB kernel)
-// Routine 2: GEMM => GEPP => GEBP (最终规约到 GEBP kernel)
-// Routine 3: GEMM => GEPM => GEPDOT (最终规约到 GEPDOT kernel)
-enum class KernelRoutine {
-    Routine1_GEPB,
-    Routine2_GEBP,
-    Routine3_GEPDOT,
-};
 
 // GEMM Buffers for data packing and relayout
+// for strided layout, the matrix should be in row-major order
+// for dense layout, the data addressing order is determined by the PackDirection
 template <typename T>
 class Buffer {
 public:
     Buffer() = default;
-    // v1: just a view, does not own the data
+    // create a tile view, the creator does not own the buffer
     Buffer(T* data, int rows, int cols, int stride, 
            DataLayout layout = DataLayout::Strided)
         : data_(data), rows_(rows), cols_(cols), layout_(layout) {
@@ -153,21 +158,14 @@ public:
         ownership_ = false;
         stride_ = layout == DataLayout::Strided ? stride : MIN_STRIDE / sizeof(T);
     }
-    // v2: we allocate memory for packed data, and own the data
-    Buffer(int rows, int cols, PackDirection dir = PackDirection::RowMajor) 
-        : rows_(rows), cols_(cols), direction_(dir) {
-        
-        // alloc memory
-        void *raw = std::aligned_alloc(CACHELINE_SIZE, rows * cols * sizeof(T));
-        if (!raw) throw std::bad_alloc();
-        data_ = static_cast<T*>(raw);
-
-        layout_ = DataLayout::Dense;
-        ownership_ = true;
+    // create a buffer for a tile(usually for packed data), the creator owns the buffer
+    Buffer(int rows, int cols, PackDirection dir = PackDirection::RowMajor) {
+        allocate_dense(rows, cols, dir);
     }
 
     virtual ~Buffer() { deallocate(); }
 
+    // Allocate a dense buffer
     void allocate_dense(int rows, int cols, PackDirection dir = PackDirection::RowMajor) {
         deallocate();
         void *raw = std::aligned_alloc(CACHELINE_SIZE, rows * cols * sizeof(T));
@@ -304,6 +302,7 @@ public:
 
 
 // software prefetch helper for A, B, C
+template <bool Strided>
 struct SWPFHelper {
     bool on = true;
     const int8_t* ptr = nullptr;
@@ -312,20 +311,27 @@ private:
     int step = 0;
     _mm_hint HINT = _MM_HINT_T1; // 预取级别
     size_t _bytes = 0;
-    int bytes_per_row = 0, stride_in_bytes = 0;
+    size_t _row_bytes = 0;
+    size_t bytes_per_row = 0;
+    size_t stride_in_bytes = 0;
 
 public:
     SWPFHelper() = default;
-    // continuous data prefetch
+    // continuous (dense) data prefetch
     SWPFHelper(size_t size, int step, const _mm_hint HINT = _MM_HINT_T1)
-        : size(size), step(step), HINT(HINT) {}
+        : size(size), step(step), HINT(HINT) {
+        static_assert(!Strided, "dense constructor used for a strided SWPFHelper");
+    }
     // strided data prefetch
-    SWPFHelper(size_t size, int step, int bytes_per_row, int stride_in_bytes, const _mm_hint HINT = _MM_HINT_T1)
-        : size(size), step(step), HINT(HINT), bytes_per_row(bytes_per_row), stride_in_bytes(stride_in_bytes) {}
+    SWPFHelper(size_t size, int step, size_t bytes_per_row, size_t stride_in_bytes, const _mm_hint HINT = _MM_HINT_T1)
+        : size(size), step(step), HINT(HINT), bytes_per_row(bytes_per_row), stride_in_bytes(stride_in_bytes) {
+        static_assert(Strided, "strided constructor used for a dense SWPFHelper");
+    }
 
     ALWAYS_INLINE void init(const int8_t* ptr) {
         this->ptr = ptr;
         _bytes = 0;
+        if constexpr (Strided) _row_bytes = 0; // init 时 ptr 落在行首，行内计数归零
     }
 
     ALWAYS_INLINE void prefetch() {
@@ -335,14 +341,26 @@ public:
         for (int i = 0; i < step; i++) {
             _mm_prefetch(ptr, HINT);
             _bytes += CACHELINE_SIZE;
-            if (stride_in_bytes > 0 && _bytes % bytes_per_row == 0) {
-                ptr += stride_in_bytes - bytes_per_row; // move to the beginning of next row
+            if constexpr (Strided) {
+                _row_bytes += CACHELINE_SIZE;
+                if (_row_bytes == bytes_per_row) {
+                    ptr += stride_in_bytes - bytes_per_row; // move to the beginning of next row
+                    _row_bytes = 0;
+                } else {
+                    ptr += CACHELINE_SIZE;
+                }
             } else {
                 ptr += CACHELINE_SIZE;
             }
         }
     }
 };
+
+// deduction guides: 由构造实参个数静态选出 Dense / Strided 特化
+SWPFHelper(size_t, int) -> SWPFHelper<false>;
+SWPFHelper(size_t, int, _mm_hint) -> SWPFHelper<false>;
+SWPFHelper(size_t, int, int, int) -> SWPFHelper<true>;
+SWPFHelper(size_t, int, int, int, _mm_hint) -> SWPFHelper<true>;
 
 
 
@@ -356,28 +374,27 @@ public:
                    const void* RESTRICT A,
                    const void* RESTRICT B,
                    void* RESTRICT C,
-                   const GEMMParams& params = GEMMParams(),
-                   const BlockingConfig& blocking = BlockingConfig())
+                   const GEMMParams& params = GEMMParams())
         : M(M), N(N), K(K),
           lda(lda), ldb(ldb), ldc(ldc),
           A(static_cast<const int8_t*>(A)),
           B(static_cast<const int8_t*>(B)),
           C(static_cast<int32_t*>(C)),
           params(params),
-          MC(round_down(blocking.MC, MR)),
-          NC(round_down(blocking.NC, NR)),
-          KC(round_down(blocking.KC, KR))
+          MC(params.MC),
+          NC(params.NC),
+          KC(params.KC)
     {
         if (M % MR != 0 || N % NR != 0 || K % KR != 0) {
             std::cerr << "[Error] Matrix dimensions must be multiples of micro-kernel sizes(" << MR << "x" << NR << "x" << KR << ")!\n";
             std::abort();
         }
-        if (blocking.MC < MR || blocking.NC < NR || blocking.KC < KR) {
-            std::cerr << "[Error] Blocking sizes must be at least " << MR << "x" << NR << "x" << KR << "!\n";
+        if (MC % MR != 0 || NC % NR != 0 || KC % KR != 0) {
+            std::cerr << "[Error] Blocking sizes must be multiples of micro-kernel sizes(" << MR << "x" << NR << "x" << KR << ")!\n";
             std::abort();
         }
 
-        find_best_routine();
+        select_kernel(); // heuristic tune
     }
 
     // Initialize AMX and tile configuration
@@ -423,6 +440,13 @@ public:
     void pack_B();
     void unpack_C();
 
+    // select_kernel() 为该 shape 选中的 kernel 名(GEPB/GEBP/...), 供日志展示
+    const char* kernel_name() const { return kernel_name_; }
+    const char* loop_order_name() const { return loop_order_str(selected_loop_order); }
+    bool is_A_packed() const { return bufA.valid(); }
+    bool is_B_packed() const { return bufB.valid(); }
+    bool is_C_packed() const { return bufC.valid(); }
+
 
 private:
     // shape
@@ -434,8 +458,12 @@ private:
     int32_t* RESTRICT C;
 
     const GEMMParams params; // GEMM parameters
-    const int MC, NC, KC; // Cache blocking sizes
-    KernelRoutine routine; // GEMM routine to use
+    const int MC, NC, KC;    // Cache blocking sizes
+
+    using FuncPtr = void (GEMMKernelInt8::*)();
+    FuncPtr selected_kernel = nullptr;
+    const char* kernel_name_ = ""; // 选中 kernel 的名字
+    LoopOrder selected_loop_order;    // macro kernel 的 loop 嵌套顺序
 
     // data relayout for whole matrix A, B, C
     BufferA<int8_t> bufA;
@@ -470,7 +498,9 @@ private:
         return K >= SCALE_FACTOR * KC;
     }
 
-    void find_best_routine();
+    void select_kernel();
+    // 按选中的 loop_order + pack 计划分配 owned dense buffer(buffer 形状由 loop_order 决定)
+    void allocate_selected_buffers(bool packA, bool packB, bool packC);
 
     // compute kernels
     void GEMM_();
@@ -480,8 +510,6 @@ private:
     void GEPB_();
     void GEBP_();
     void GEPDOT_();
-    using FuncPtr = void (GEMMKernelInt8::*)();
-    FuncPtr compute_func = nullptr;
 
     void GEBP_kernel(BufferA<int8_t>& blockA, BufferB<int8_t>& panelB, BufferC<int32_t>& panelC, 
                      bool acc = true, const int8_t* B_kc_base = nullptr); 
@@ -680,8 +708,7 @@ public:
                       const void* RESTRICT B,
                       void* RESTRICT C,
                       const ThreadParams& params = ThreadParams(),
-                      const GEMMParams& gemm_params = GEMMParams(),
-                      const BlockingConfig& blocking = BlockingConfig())
+                      const GEMMParams& gemm_params = GEMMParams())
         : M(M), N(N), K(K),
           lda(lda), ldb(ldb), ldc(ldc),
           A(static_cast<const int8_t*>(A)),
@@ -689,16 +716,16 @@ public:
           C(static_cast<int32_t*>(C)),
           params(params),
           gemm_params(gemm_params),
-          MC(round_down(blocking.MC, MR)),
-          NC(round_down(blocking.NC, NR)),
-          KC(round_down(blocking.KC, KR))
+          MC(gemm_params.MC),
+          NC(gemm_params.NC),
+          KC(gemm_params.KC)
     {
         if (M % MR != 0 || N % NR != 0 || K % KR != 0) {
             std::cerr << "[Error] Matrix dimensions must be multiples of micro-kernel sizes(" << MR << "x" << NR << "x" << KR << ")!\n";
             std::abort();
         }
-        if (blocking.MC < MR || blocking.NC < NR || blocking.KC < KR) {
-            std::cerr << "[Error] Blocking sizes must be at least " << MR << "x" << NR << "x" << KR << "!\n";
+        if (MC % MR != 0 || NC % NR != 0 || KC % KR != 0) {
+            std::cerr << "[Error] Blocking sizes must be multiples of micro-kernel sizes(" << MR << "x" << NR << "x" << KR << ")!\n";
             std::abort();
         }
 
@@ -713,8 +740,7 @@ public:
     void restore_packed_data();
     void GEMM_compute(); // AMX GEMM compute function
 
-    // Top-level AMX GEMM function
-    void GEMM();
+    void GEMM(); // Top-level AMX GEMM function with online packing/unpacking
 
 
 private:
