@@ -30,6 +30,8 @@
 #define ALWAYS_INLINE inline
 #endif
 
+#include "buffer.hpp"   // Buffer / View / Role / Layout / make_view
+#include "packing.hpp"  // pack_from / unpack_to + tile 原语 + tile 常量
 
 namespace amx {
 
@@ -38,18 +40,6 @@ namespace amx {
 #define XFEATURE_XTILECFG 17
 #define XFEATURE_XTILEDATA 18
 
-// Tile Register Constants
-#define MAX_ROWS     16
-#define MAX_COLS_i8  64
-#define MAX_COLS_i32 16
-#define TILE_SIZE_i8  (MAX_ROWS * MAX_COLS_i8)
-#define TILE_SIZE_i32 (MAX_ROWS * MAX_COLS_i32)
-#define MIN_STRIDE 64 // minimum stride in bytes
-#define CACHELINE_SIZE 64
-
-#define KPACK_b8  4
-#define KPACK_b16 2
-#define KPACK_b32 1
 
 // Define tile config data structure
 struct alignas(64) TileConfig {
@@ -98,15 +88,10 @@ static bool set_tiledata_use() {
 #define B0  6
 #define B1  7
 // register blocking 2A2B4C, micro-kernel shape is fixed = 32 x 32 x 64
-static constexpr int MR = MAX_ROWS * 2;
-static constexpr int NR = MAX_ROWS * 2;
-static constexpr int KR = MAX_COLS_i8;
 
 
 
 // [Important!] We assume all matrices are in row-major order, as in C blas.
-enum class DataLayout { Strided, Dense };
-enum class PackDirection { RowMajor, ColMajor };
 // LoopOrder: marco-kernel 的循环嵌套顺序。8 种矩阵形状(GEMM/GEPP/GEMP/GEPB/GEPM/GEBP/GEPDOT)
 // 最终归纳到 3 种两级 loop 顺序, 每种以一个 Goto 叶子 micro-kernel 收尾。
 enum class LoopOrder {
@@ -127,6 +112,7 @@ inline const char* loop_order_str(LoopOrder lo) {
 
 
 class GEMMKernelInt8; // 前置声明: GEMMParams::FuncPtr 需要它
+using FuncPtr = void (GEMMKernelInt8::*)();
 
 // parameter structure for GEMM kernel
 struct GEMMParams {
@@ -137,168 +123,11 @@ struct GEMMParams {
     int NC = 512;
     int KC = 1280;
     // manual kernel selection
-    using FuncPtr = void (GEMMKernelInt8::*)();
     FuncPtr kernel = nullptr;
     LoopOrder loop_order = LoopOrder::NONE;
 };
 
 
-// GEMM Buffers for data packing and relayout
-// for strided layout, the matrix should be in row-major order
-// for dense layout, the data addressing order is determined by the PackDirection
-template <typename T>
-class Buffer {
-public:
-    Buffer() = default;
-    // create a tile view, the creator does not own the buffer
-    Buffer(T* data, int rows, int cols, int stride, 
-           DataLayout layout = DataLayout::Strided)
-        : data_(data), rows_(rows), cols_(cols), layout_(layout) {
-
-        ownership_ = false;
-        stride_ = layout == DataLayout::Strided ? stride : MIN_STRIDE / sizeof(T);
-    }
-    // create a buffer for a tile(usually for packed data), the creator owns the buffer
-    Buffer(int rows, int cols, PackDirection dir = PackDirection::RowMajor) {
-        allocate_dense(rows, cols, dir);
-    }
-
-    virtual ~Buffer() { deallocate(); }
-
-    // Allocate a dense buffer
-    void allocate_dense(int rows, int cols, PackDirection dir = PackDirection::RowMajor) {
-        deallocate();
-        void *raw = std::aligned_alloc(CACHELINE_SIZE, rows * cols * sizeof(T));
-        if (!raw) throw std::bad_alloc();
-
-        data_ = static_cast<T*>(raw);
-        ownership_ = true;
-        rows_ = rows;
-        cols_ = cols;
-        layout_ = DataLayout::Dense;
-        direction_ = dir;
-    }
-
-    void release_owned_data() {
-        deallocate();
-        data_ = nullptr;
-        ownership_ = false;
-    }
-
-    T* data() { return data_; }
-    const T* data() const { return data_; }
-    bool valid() const { return data_ != nullptr; }
-
-    inline int rows() const { return rows_; }
-    inline int cols() const { return cols_; }
-    inline int size() const { return rows_ * cols_; }
-    inline size_t size_in_bytes() const { return rows_ * cols_ * sizeof(T); }
-    inline int stride() const { return stride_; }
-    inline DataLayout layout() const { return layout_; }
-    inline PackDirection direction() const { return direction_; }
-    inline bool owns_data() const { return ownership_; }
-
-    inline bool is_dense() const { return layout_ == DataLayout::Dense; }
-    inline bool is_strided() const { return layout_ == DataLayout::Strided; }
-
-    // pointer arithmetic for strided layouts
-    T* ptr(int r, int c) {
-        assert(this->is_strided());
-        return data_ + r * stride_ + c;
-    }
-
-    T& operator()(int r, int c) { return *ptr(r, c); }
-    const T& operator()(int r, int c) const { return *ptr(r, c); }
-
-    // pointer arithmetic for dense layouts
-    virtual T* packed_ptr(int r, int c) = 0;
-
-    inline void reset_rows(int rows) { rows_ = rows; }
-    inline void reset_cols(int cols) { cols_ = cols; }
-
-    virtual void pack_from(const T* src, int stride, int cache_blocking_sz = 0) = 0;
-    virtual void unpack_to(T* dst, int stride, bool acc = true, int cache_blocking_sz = 0) const = 0;
-
-
-protected:
-    T* data_ = nullptr;
-    bool ownership_ = false; // whether this buffer owns the data and is responsible for freeing it
-    int rows_ = 0;
-    int cols_ = 0;
-    DataLayout layout_ = DataLayout::Dense;
-    int stride_ = MIN_STRIDE / sizeof(T); 
-    PackDirection direction_ = PackDirection::RowMajor;
-
-    inline void deallocate() {
-        if (ownership_ && data_) { std::free(data_); }
-    }
-};
-
-
-// Buffer for A data
-template <typename T>
-class BufferA : public Buffer<T> {
-public:
-    using Buffer<T>::Buffer;
-    void pack_from(const T* src, int stride, int cache_blocking_sz = 0) override;
-    void unpack_to(T*, int, bool = true, int = 0) const override {}
-
-    T* packed_ptr(int r, int c) override {
-        assert(this->is_dense());
-        assert(r % MR == 0 && c % KR == 0);
-        if (this->direction() == PackDirection::RowMajor) {
-            return this->data_ + r * this->cols_ + c * MR;
-        } else {
-            return this->data_ + c * this->rows_ + r * KR;
-        }
-    }
-};
-
-// Buffer for B data
-template <typename T>
-class BufferB : public Buffer<T> {
-public:
-    using Buffer<T>::Buffer;
-    void pack_from(const T* src, int stride, int cache_blocking_sz = 0) override;
-    void unpack_to(T*, int, bool = true, int = 0) const override {}
-
-    T* packed_ptr(int r, int c) override {
-        assert(this->is_dense());
-        assert(r % KR == 0 && c % NR == 0);
-        if (this->direction() == PackDirection::RowMajor) {
-            return this->data_ + r * this->cols_ + c * KR;
-        } else {
-            return this->data_ + c * this->rows_ + r * NR;
-        }
-    }
-};
-
-// Buffer for C data
-template <typename T>
-class BufferC : public Buffer<T> {
-public:
-    using Buffer<T>::Buffer;
-    void pack_from(const T*, int, int = 0) override {}
-    // origin C(strided) += BufferC(packed) if acc=true, otherwise overwrite
-    void unpack_to(T* dst, int stride, bool acc = true, int cache_blocking_sz = 0) const override;
-
-    T* packed_ptr(int r, int c) override {
-        assert(this->is_dense());
-        assert(r % MR == 0 && c % NR == 0);
-        if (this->direction() == PackDirection::RowMajor) {
-            return this->data_ + r * this->cols_ + c * MR;
-        } else {
-            return this->data_ + c * this->rows_ + r * NR;
-        }
-    }
-
-    T* next_tile_ptr(int r, int c) {
-        assert(this->is_strided());
-        int next_r = c + NR < this->cols_ ? r : r + MR;
-        int next_c = c + NR < this->cols_ ? c + NR : 0;
-        return this->ptr(next_r, next_c);
-    }
-};
 
 
 // software prefetch helper for A, B, C
@@ -440,12 +269,22 @@ public:
     void pack_B();
     void unpack_C();
 
-    // select_kernel() 为该 shape 选中的 kernel 名(GEPB/GEBP/...), 供日志展示
-    const char* kernel_name() const { return kernel_name_; }
-    const char* loop_order_name() const { return loop_order_str(selected_loop_order); }
+    FuncPtr   selected_kernel_ptr() const { return selected_spec_->kernel; }
+    LoopOrder loop_order()          const { return selected_spec_->loop_order; }
+    const char* kernel_name()       const { return selected_spec_->kernel_name; }
+    const char* loop_order_name()   const { return loop_order_str(selected_spec_->loop_order); }
+    
     bool is_A_packed() const { return bufA.valid(); }
     bool is_B_packed() const { return bufB.valid(); }
     bool is_C_packed() const { return bufC.valid(); }
+
+    struct KernelSpec {
+        FuncPtr     kernel;      // 即 void (GEMMKernelInt8::*)()
+        LoopOrder   loop_order;
+        const char* kernel_name;
+        bool        packA, packB, packC;
+    };
+    static const std::array<KernelSpec, 9>& kernel_specs();
 
 
 private:
@@ -460,24 +299,18 @@ private:
     const GEMMParams params; // GEMM parameters
     const int MC, NC, KC;    // Cache blocking sizes
 
-    using FuncPtr = void (GEMMKernelInt8::*)();
-    FuncPtr selected_kernel = nullptr;
-    const char* kernel_name_ = ""; // 选中 kernel 的名字
-    LoopOrder selected_loop_order;    // macro kernel 的 loop 嵌套顺序
+    // 选中的 routine 行(kernel / loop_order / name / pack 全从这里派生), 指向 kernel_specs() 静态表。
+    const KernelSpec* selected_spec_ = nullptr;
 
     // data relayout for whole matrix A, B, C
-    BufferA<int8_t> bufA;
-    BufferB<int8_t> bufB;
-    BufferC<int32_t> bufC;
-    // packing utilities
-    void pack_matrix_a_3d(int8_t* dst, PackDirection dir);
-    void pack_matrix_b_3d(int8_t* dst, PackDirection dir);
-    void unpack_matrix_c_3d(const int32_t* src, PackDirection dir);
+    Buffer<int8_t>  bufA;   // 纯存储;shape/stride/role 由 make_view 在使用点赋予
+    Buffer<int8_t>  bufB;
+    Buffer<int32_t> bufC;
 
     // shape check for GEMM
-    void check_shape_health(const Buffer<int8_t>& bufA, 
-                            const Buffer<int8_t>& bufB, 
-                            const Buffer<int32_t>& bufC)
+    void check_shape_health(const View<int8_t>& bufA,
+                            const View<int8_t>& bufB,
+                            const View<int32_t>& bufC)
     {
         if (bufA.cols() != bufB.rows() || bufA.rows() != bufC.rows() || bufB.cols() != bufC.cols()) {
             std::cerr << "[Error] Shape mismatch for GEMM! A: " << bufA.rows() << "x" << bufA.cols()
@@ -499,8 +332,6 @@ private:
     }
 
     void select_kernel();
-    // 按选中的 loop_order + pack 计划分配 owned dense buffer(buffer 形状由 loop_order 决定)
-    void allocate_selected_buffers(bool packA, bool packB, bool packC);
 
     // compute kernels
     void GEMM_();
@@ -511,11 +342,11 @@ private:
     void GEBP_();
     void GEPDOT_();
 
-    void GEBP_kernel(BufferA<int8_t>& blockA, BufferB<int8_t>& panelB, BufferC<int32_t>& panelC, 
+    void GEBP_kernel(View<int8_t> blockA, View<int8_t> panelB, View<int32_t> panelC, 
                      bool acc = true, const int8_t* B_kc_base = nullptr); 
 
     template <bool B_is_dense, bool C_is_dense>
-    void GEBP_kernel_impl(BufferA<int8_t>& blockA, BufferB<int8_t>& panelB, BufferC<int32_t>& panelC, 
+    void GEBP_kernel_impl(View<int8_t> blockA, View<int8_t> panelB, View<int32_t> panelC, 
                           bool acc, const int8_t* B_kc_base);
 
     struct GEPBKernelConfig {
@@ -533,34 +364,34 @@ private:
         }
     };
 
-    void GEPB_kernel(BufferA<int8_t>& panelA, BufferB<int8_t>& blockB, BufferC<int32_t>& panelC, 
+    void GEPB_kernel(View<int8_t> panelA, View<int8_t> blockB, View<int32_t> panelC, 
                      const GEPBKernelConfig& cfg);
 
     template <bool fuse_packA, bool overwrite_C>
     void GEPB_kernel_impl_denseABC(
-        BufferA<int8_t>& panelA,
-        BufferB<int8_t>& blockB, 
-        BufferC<int32_t>& panelC,
+        View<int8_t> panelA,
+        View<int8_t> blockB, 
+        View<int32_t> panelC,
         const int8_t* originA);
 
     template <bool fuse_packA, bool overwrite_C>
     void GEPB_kernel_impl_denseAB_stridedC(
-        BufferA<int8_t>& panelA,
-        BufferB<int8_t>& blockB, 
-        BufferC<int32_t>& panelC,
+        View<int8_t> panelA,
+        View<int8_t> blockB, 
+        View<int32_t> panelC,
         const int8_t* originA);
 
     template <bool overwrite_C>
     void GEPB_kernel_impl_denseBC_stridedA(
-        BufferA<int8_t>& panelA, 
-        BufferB<int8_t>& blockB, 
-        BufferC<int32_t>& panelC);
+        View<int8_t> panelA, 
+        View<int8_t> blockB, 
+        View<int32_t> panelC);
 
     template <bool overwrite_C>
     void GEPB_kernel_impl_denseB_stridedAC(
-        BufferA<int8_t>& panelA, 
-        BufferB<int8_t>& blockB, 
-        BufferC<int32_t>& panelC);
+        View<int8_t> panelA, 
+        View<int8_t> blockB, 
+        View<int32_t> panelC);
     
     ////////////////////////////////////////////////////////
     // Helper functions for tile operations
@@ -593,53 +424,56 @@ private:
     #define store_tileC_l1(src, c_base, r, c, ldc) \
         _tile_stored(src, &c_base[OFFSET2D(r, c, ldc)], ldc * sizeof(int32_t))
 
-    // tileloadd A0 and A1
-    static ALWAYS_INLINE void load_2_tileA_l1(const int8_t* a, int lda) {
-        _tile_loadd(A0, a, lda * sizeof(int8_t));                  // Load A0
-        _tile_loadd(A1, a + MAX_ROWS * lda, lda * sizeof(int8_t)); // Load A1
-    }
-    // dense tileloadd A0 and A1(for packed A)
+    // A0/A1 — dense(packed A,running 指针,stride=MIN_STRIDE)
     static ALWAYS_INLINE void load_2_tileA_l1(const int8_t* a) {
-        _tile_loadd(A0, a, MIN_STRIDE);                // Load A0
-        _tile_loadd(A1, a + TILE_SIZE_i8, MIN_STRIDE); // Load A1
+        _tile_loadd(A0, a, MIN_STRIDE);
+        _tile_loadd(A1, a + TILE_SIZE_i8, MIN_STRIDE);
     }
-    // tileloadd B0 and B1
-    static ALWAYS_INLINE void load_2_tileB_l1(const int8_t* b, int ldb) {
-        _tile_loadd(B0, b, ldb * sizeof(int8_t));               // Load B0
-        _tile_loadd(B1, b + MAX_COLS_i8, ldb * sizeof(int8_t)); // Load B1
+    // A0/A1 — 通用(strided 或 dense):第二 tile 恒在 MAX_ROWS*row_bytes 处。供 View::tile 用。
+    static ALWAYS_INLINE void load_2_tileA_l1(Tile<int8_t> t) {
+        _tile_loadd(A0, t.data, t.row_bytes);
+        _tile_loadd(A1, t.data + MAX_ROWS * t.row_bytes, t.row_bytes);
     }
-    // dense tileloadd B0 and B1(for packed B)
+    // B0/B1 — dense(packed B)
     static ALWAYS_INLINE void load_2_tileB_l1(const int8_t* b) {
-        _tile_loadd(B0, b, MIN_STRIDE);                // Load B0
-        _tile_loadd(B1, b + TILE_SIZE_i8, MIN_STRIDE); // Load B1
+        _tile_loadd(B0, b, MIN_STRIDE);
+        _tile_loadd(B1, b + TILE_SIZE_i8, MIN_STRIDE);
     }
-    // tileloadd C0,C1,C2,C3
-    static ALWAYS_INLINE void load_4_tileC_l1(const int32_t* c, int ldc) {
-        _tile_loadd(C00, c, ldc * sizeof(int32_t));                         // Load C0
-        _tile_loadd(C01, c + MAX_COLS_i32, ldc * sizeof(int32_t));          // Load C1
-        _tile_loadd(C10, c + MAX_ROWS * ldc, ldc * sizeof(int32_t));        // Load C2
-        _tile_loadd(C11, c + MAX_ROWS * ldc + MAX_COLS_i32, ldc * sizeof(int32_t)); // Load C3
+    static ALWAYS_INLINE void load_2_tileB_l1(Tile<int8_t> t) {
+        _tile_loadd(B0, t.data, t.row_bytes);
+        _tile_loadd(B1, t.data + MAX_ROWS * t.row_bytes, t.row_bytes);
     }
-    // dense tileloadd C0,C1,C2,C3(for packed C)
+    // C00..C11 — dense(packed C,4 tile 连续码放)
     static ALWAYS_INLINE void load_4_tileC_l1(const int32_t* c) {
-        _tile_loadd(C00, c, MIN_STRIDE);                         // Load C0
-        _tile_loadd(C01, c + TILE_SIZE_i32, MIN_STRIDE);         // Load C1
-        _tile_loadd(C10, c + 2 * TILE_SIZE_i32, MIN_STRIDE);     // Load C2
-        _tile_loadd(C11, c + 3 * TILE_SIZE_i32, MIN_STRIDE);     // Load C3
+        _tile_loadd(C00, c, MIN_STRIDE);
+        _tile_loadd(C01, c + TILE_SIZE_i32, MIN_STRIDE);
+        _tile_loadd(C10, c + 2 * TILE_SIZE_i32, MIN_STRIDE);
+        _tile_loadd(C11, c + 3 * TILE_SIZE_i32, MIN_STRIDE);
     }
-    // tilestored C0,C1,C2,C3
-    static ALWAYS_INLINE void store_4_tileC_l1(int32_t* c, int ldc) {
-        _tile_stored(C00, c, ldc * sizeof(int32_t));                         // Store C0
-        _tile_stored(C01, c + MAX_COLS_i32, ldc * sizeof(int32_t));          // Store C1
-        _tile_stored(C10, c + MAX_ROWS * ldc, ldc * sizeof(int32_t));        // Store C2
-        _tile_stored(C11, c + MAX_ROWS * ldc + MAX_COLS_i32, ldc * sizeof(int32_t)); // Store C3
+    // C00..C11 — strided(原始 C 的 2x2 网格),byte-stride 来自 View::tile
+    static ALWAYS_INLINE void load_4_tileC_l1(Tile<int32_t> t) {
+        int32_t* c10 = reinterpret_cast<int32_t*>(
+            reinterpret_cast<int8_t*>(t.data) + MAX_ROWS * t.row_bytes); // 下移 16 行
+        _tile_loadd(C00, t.data,                t.row_bytes);
+        _tile_loadd(C01, t.data + MAX_COLS_i32, t.row_bytes);            // 右移 16 列
+        _tile_loadd(C10, c10,                   t.row_bytes);
+        _tile_loadd(C11, c10 + MAX_COLS_i32,    t.row_bytes);
     }
-    // dense tilestored C0,C1,C2,C3(for packed C)
+    // store C00..C11 — dense(packed C)
     static ALWAYS_INLINE void store_4_tileC_l1(int32_t* c) {
-        _tile_stored(C00, c, MIN_STRIDE);                     // Store C0
-        _tile_stored(C01, c + TILE_SIZE_i32, MIN_STRIDE);     // Store C1
-        _tile_stored(C10, c + 2 * TILE_SIZE_i32, MIN_STRIDE); // Store C2
-        _tile_stored(C11, c + 3 * TILE_SIZE_i32, MIN_STRIDE); // Store C3
+        _tile_stored(C00, c, MIN_STRIDE);
+        _tile_stored(C01, c + TILE_SIZE_i32, MIN_STRIDE);
+        _tile_stored(C10, c + 2 * TILE_SIZE_i32, MIN_STRIDE);
+        _tile_stored(C11, c + 3 * TILE_SIZE_i32, MIN_STRIDE);
+    }
+    // store C00..C11 — strided(2x2 网格)
+    static ALWAYS_INLINE void store_4_tileC_l1(Tile<int32_t> t) {
+        int32_t* c10 = reinterpret_cast<int32_t*>(
+            reinterpret_cast<int8_t*>(t.data) + MAX_ROWS * t.row_bytes);
+        _tile_stored(C00, t.data,                t.row_bytes);
+        _tile_stored(C01, t.data + MAX_COLS_i32, t.row_bytes);
+        _tile_stored(C10, c10,                   t.row_bytes);
+        _tile_stored(C11, c10 + MAX_COLS_i32,    t.row_bytes);
     }
 
 
@@ -652,44 +486,43 @@ private:
     #define load_tileC_l2(dst, c_base, r, c, ldc) \
         _tile_stream_loadd(dst, &c_base[OFFSET2D(r, c, ldc)], ldc * sizeof(int32_t))
 
-    // tileloaddt1 A0 and A1
-    static ALWAYS_INLINE void load_2_tileA_l2(const int8_t* a, int lda) {
-        _tile_stream_loadd(A0, a, lda * sizeof(int8_t));                  // Load A0
-        _tile_stream_loadd(A1, a + MAX_ROWS * lda, lda * sizeof(int8_t)); // Load A1
-    }
-    // dense tileloaddt1 A0 and A1(for packed A)
+    // A0/A1 — dense(stream,packed A)
     static ALWAYS_INLINE void load_2_tileA_l2(const int8_t* a) {
-        _tile_stream_loadd(A0, a, MIN_STRIDE);                // Load A0
-        _tile_stream_loadd(A1, a + TILE_SIZE_i8, MIN_STRIDE); // Load A1
+        _tile_stream_loadd(A0, a, MIN_STRIDE);
+        _tile_stream_loadd(A1, a + TILE_SIZE_i8, MIN_STRIDE);
     }
-    // tileloaddt1 B0 and B1
-    static ALWAYS_INLINE void load_2_tileB_l2(const int8_t* b, int ldb) {
-        _tile_stream_loadd(B0, b, ldb * sizeof(int8_t));               // Load B0
-        _tile_stream_loadd(B1, b + MAX_COLS_i8, ldb * sizeof(int8_t)); // Load B1
+    // A0/A1 — 通用(strided 或 dense,stream)
+    static ALWAYS_INLINE void load_2_tileA_l2(Tile<int8_t> t) {
+        _tile_stream_loadd(A0, t.data, t.row_bytes);
+        _tile_stream_loadd(A1, t.data + MAX_ROWS * t.row_bytes, t.row_bytes);
     }
-    // dense tileloaddt1 B0 and B1(for packed B)
+    // B0/B1 — dense(stream,packed B)
     static ALWAYS_INLINE void load_2_tileB_l2(const int8_t* b) {
-        _tile_stream_loadd(B0, b, MIN_STRIDE);                // Load B0
-        _tile_stream_loadd(B1, b + TILE_SIZE_i8, MIN_STRIDE); // Load B1
+        _tile_stream_loadd(B0, b, MIN_STRIDE);
+        _tile_stream_loadd(B1, b + TILE_SIZE_i8, MIN_STRIDE);
     }
-    // tileloaddt1 C0,C1,C2,C3
-    static ALWAYS_INLINE void load_4_tileC_l2(const int32_t* c, int ldc) {
-        _tile_stream_loadd(C00, c, ldc * sizeof(int32_t));                     // Load C0
-        _tile_stream_loadd(C01, c + MAX_COLS_i32, ldc * sizeof(int32_t));      // Load C1
-        _tile_stream_loadd(C10, c + MAX_ROWS * ldc, ldc * sizeof(int32_t));    // Load C2
-        _tile_stream_loadd(C11, c + MAX_ROWS * ldc + MAX_COLS_i32, ldc * sizeof(int32_t)); // Load C3
+    static ALWAYS_INLINE void load_2_tileB_l2(Tile<int8_t> t) {
+        _tile_stream_loadd(B0, t.data, t.row_bytes);
+        _tile_stream_loadd(B1, t.data + MAX_ROWS * t.row_bytes, t.row_bytes);
     }
-    // dense tileloaddt1 C0,C1,C2,C3(for packed C)
+    // C00..C11 — dense(stream,packed C)
     static ALWAYS_INLINE void load_4_tileC_l2(const int32_t* c) {
-        _tile_stream_loadd(C00, c, MIN_STRIDE);                     // Load C0
-        _tile_stream_loadd(C01, c + TILE_SIZE_i32, MIN_STRIDE);     // Load C1
-        _tile_stream_loadd(C10, c + 2 * TILE_SIZE_i32, MIN_STRIDE); // Load C2
-        _tile_stream_loadd(C11, c + 3 * TILE_SIZE_i32, MIN_STRIDE); // Load C3
+        _tile_stream_loadd(C00, c, MIN_STRIDE);
+        _tile_stream_loadd(C01, c + TILE_SIZE_i32, MIN_STRIDE);
+        _tile_stream_loadd(C10, c + 2 * TILE_SIZE_i32, MIN_STRIDE);
+        _tile_stream_loadd(C11, c + 3 * TILE_SIZE_i32, MIN_STRIDE);
+    }
+    // C00..C11 — strided(stream,2x2 网格)
+    static ALWAYS_INLINE void load_4_tileC_l2(Tile<int32_t> t) {
+        int32_t* c10 = reinterpret_cast<int32_t*>(
+            reinterpret_cast<int8_t*>(t.data) + MAX_ROWS * t.row_bytes);
+        _tile_stream_loadd(C00, t.data,                t.row_bytes);
+        _tile_stream_loadd(C01, t.data + MAX_COLS_i32, t.row_bytes);
+        _tile_stream_loadd(C10, c10,                   t.row_bytes);
+        _tile_stream_loadd(C11, c10 + MAX_COLS_i32,    t.row_bytes);
     }
 
 };
-
-
 
 
 
