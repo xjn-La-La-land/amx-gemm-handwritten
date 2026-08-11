@@ -3,6 +3,8 @@
 # binary 直接读本文件(--config); bench.sh 也从这里读 freq(锁频)与 cores/node(绑核)。
 # 键名 = binary 的长选项名(去掉 --)。CLI 参数可临时覆盖本文件。
 
+output = "gepp-i8-1core.csv"
+
 # ---- bench.sh 与 binary 共享 ----
 freq  = 3000000        # kHz
 
@@ -28,6 +30,14 @@ dim-k = "1280"
 MC = 512
 NC = 512
 KC = 1280
+
+# ---- online 专属(autotune; 单核, 每 shape 经验式挑最快配置)----
+autotune = true                 # 开启(默认关; 关闭时走 heuristic, 结果与旧版一致)
+no-autotune-kernel = false       # 只调 blocking, kernel/loop_order 固定为 heuristic(默认连 kernel 一起调)
+# autotune-mc = [256, 512, 1024]  # MC 候选
+# autotune-nc = [256, 512, 1024]  # NC 候选
+autotune-kc = [1024, 1280, 1536] # KC 候选
+autotune-reps = 7               # 每候选计时轮数(默认 5)
 
 # ---- offline 专属(软件预取; 取消注释以关闭)----
 # no-swpfA = true
