@@ -13,6 +13,7 @@ struct KernelLogInfo {
     std::string kernel; // 选中的 kernel 名(GEPB/GEBP/...)
     std::string loop_order;
     bool packA, packB, packC;
+    std::string buffer_allocation;
     int MC, NC, KC;
 };
 
@@ -62,6 +63,7 @@ static GEMMPlanner make_planner(const GEMMParams& params,
             .packA      = kernel->is_A_packed(),
             .packB      = kernel->is_B_packed(),
             .packC      = kernel->is_C_packed(),
+            .buffer_allocation = buffer_allocation_mode_str(page_alloc::mode()),
             .MC         = chosen_params.MC,
             .NC         = chosen_params.NC,
             .KC         = chosen_params.KC,
@@ -74,16 +76,17 @@ int main(int argc, char** argv) {
     GEMMParams params;
     bool profile_single = false;
     bool autotune = false;        // --autotune: 是否构建 Autotuner
+    std::string buffer_allocation = "auto";
     Autotuner::Options at;
 
     PerformanceTester tester;
     // 注册自定义日志列: 把选中的 kernel 配置写进 CSV(需在 configure() 前设置, 表头在那里写)
-    tester.info_columns = "kernel,loop_order,packA,packB,packC,MC,NC,KC";
+    tester.info_columns = "kernel,loop_order,packA,packB,packC,bufferAllocation,MC,NC,KC";
     tester.info_serialize = [](const std::shared_ptr<void>& p) -> std::string {
         const auto* k = static_cast<const KernelLogInfo*>(p.get());
         return k->kernel + "," + k->loop_order + "," +
                std::to_string(k->packA) + "," + std::to_string(k->packB) + "," +
-               std::to_string(k->packC) + "," +
+               std::to_string(k->packC) + "," + k->buffer_allocation + "," +
                std::to_string(k->MC) + "," + std::to_string(k->NC) + "," +
                std::to_string(k->KC);
     };
@@ -101,6 +104,9 @@ int main(int argc, char** argv) {
                 ->check(CLI::PositiveNumber);
             app.add_option("--KC", params.KC, "Blocking size in K dimension")
                 ->check(CLI::PositiveNumber);
+            app.add_option("--buffer-allocation", buffer_allocation,
+                           "Packed buffer allocation: auto, regular, or huge")
+                ->check(CLI::IsMember({"auto", "regular", "huge"}));
             app.add_flag("--profile-single", profile_single,
                          "Profile packA/packB/compute/unpackC for single-core runs");
             // ---- autotune(单核): 每 shape 经验式挑最快 (kernel,loop_order)+(MC,NC,KC) ----
@@ -118,8 +124,22 @@ int main(int argc, char** argv) {
                 ->check(CLI::PositiveNumber);
         },
         [&]() {
+            const BufferAllocationMode requested_mode =
+                parse_buffer_allocation_mode(buffer_allocation);
+            BufferAllocationMode effective_mode = requested_mode;
+            if (tester.cfg.thread_params.core_list.size() != 1 &&
+                effective_mode == BufferAllocationMode::Auto) {
+                effective_mode = BufferAllocationMode::Regular;
+            }
+            page_alloc::set_mode(effective_mode);
+
             std::cout << "Cache Block Size: MC=" << params.MC
                       << ", NC=" << params.NC << ", KC=" << params.KC << "\n";
+            std::cout << "  Buffer Allocation: "
+                      << buffer_allocation_mode_str(effective_mode);
+            if (effective_mode != requested_mode)
+                std::cout << " (requested " << buffer_allocation << ")";
+            std::cout << "\n";
             std::cout << "  Software Prefetch: On\n";
             if (profile_single)
                 std::cout << "  Single-core Stage Profile: On\n";
@@ -144,7 +164,7 @@ int main(int argc, char** argv) {
 
     // ============= Performance Test ================
     // autotune 关闭时不构建 Autotuner, planner 收到 nullptr 直接走 heuristic(chosen = params)。
-    auto tuner = autotune ? std::make_shared<Autotuner>(std::move(at)) : nullptr;
+    auto tuner = autotune ? std::make_shared<Autotuner>(std::move(at), params) : nullptr;
     if (profile_single)
         tester.benchmark_stages(make_staged_planner(params));
     else

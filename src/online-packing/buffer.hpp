@@ -8,8 +8,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <new>
+
+#include "page_alloc.hpp"
 
 namespace amx {
 
@@ -103,31 +106,23 @@ class Buffer {
 public:
     Buffer() = default;
 
-    // 分配 n_elems 个 T 的对齐内存(64B 对齐)。Buffer 只关心「有多少个元素」。
     static Buffer allocate(size_t n_elems) {
-        const size_t bytes = round_up_cacheline(n_elems * sizeof(T));
-        void* raw = std::aligned_alloc(CACHELINE_SIZE, bytes);
-        if (!raw) throw std::bad_alloc();
+        if (n_elems > std::numeric_limits<size_t>::max() / sizeof(T))
+            throw std::bad_array_new_length();
 
         Buffer buf;
-        buf.storage_.reset(static_cast<T*>(raw));
+        buf.storage_ = page_alloc::allocate(n_elems * sizeof(T));
         buf.size_ = n_elems;
         return buf;
     }
 
-    bool   valid()  const { return static_cast<bool>(storage_); }
-    T*     data()   const { return storage_.get(); }
+    bool   valid()  const { return storage_.valid(); }
+    T*     data()   const { return static_cast<T*>(storage_.data()); }
     size_t size()   const { return size_; }              // 元素个数
     size_t nbytes() const { return size_ * sizeof(T); }
 
 private:
-    struct AlignedFree { void operator()(T* p) const noexcept { std::free(p); } };
-
-    static size_t round_up_cacheline(size_t n) {
-        return (n + (CACHELINE_SIZE - 1)) & ~static_cast<size_t>(CACHELINE_SIZE - 1);
-    }
-
-    std::unique_ptr<T[], AlignedFree> storage_;
+    page_alloc::Allocation storage_;
     size_t size_ = 0; // 元素个数
 };
 

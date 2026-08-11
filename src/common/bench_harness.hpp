@@ -3,6 +3,7 @@
 // HWPFCtrl(禁用/恢复硬件预取器)来自 hw_prefetch.hpp。不依赖任何变体的 amx-gemm.hpp。
 
 #include "hw_prefetch.hpp"    // HWPFCtrl::enable/disable_prefetchers
+#include "page_alloc.hpp"
 #include "thread_params.hpp"  // amx::ThreadParams
 #include "CLI11.hpp"
 #include <algorithm>
@@ -208,7 +209,10 @@ public:
     void benchmark(GEMMPlanner planner) {
         for (const Dims& d : build_sweep(cfg.dim_m, cfg.dim_n, cfg.dim_k)) {
             Operands op = make_operands(d.M, d.N, d.K);
-            GEMMPlan plan = planner(d.M, d.N, d.K, op.A.get(), op.B.get(), op.C.get());
+            GEMMPlan plan = planner(d.M, d.N, d.K,
+                                    static_cast<int8_t*>(op.A.data()),
+                                    static_cast<int8_t*>(op.B.data()),
+                                    static_cast<int32_t*>(op.C.data()));
             std::string info_row = (info_serialize && plan.info) ? info_serialize(plan.info)
                                                                  : std::string();
             report_performance(d.M, d.N, d.K, measure(plan.run), info_row);
@@ -220,7 +224,10 @@ public:
         stage_log_header();
         for (const Dims& d : build_sweep(cfg.dim_m, cfg.dim_n, cfg.dim_k)) {
             Operands op = make_operands(d.M, d.N, d.K);
-            GEMMStagedPlan plan = planner(d.M, d.N, d.K, op.A.get(), op.B.get(), op.C.get());
+            GEMMStagedPlan plan = planner(d.M, d.N, d.K,
+                                          static_cast<int8_t*>(op.A.data()),
+                                          static_cast<int8_t*>(op.B.data()),
+                                          static_cast<int32_t*>(op.C.data()));
             StageProfile p;
             if (plan.packA)   p.packA_seconds   = measure(plan.packA);
             if (plan.packB)   p.packB_seconds   = measure(plan.packB);
@@ -235,22 +242,24 @@ private:
     std::ofstream stage_file;
 
     template <typename T>
-    static std::unique_ptr<T, void(*)(void*)> alloc(size_t n) {
-        return { static_cast<T*>(aligned_alloc(64, n * sizeof(T))),
-                 [](void* p) { free(p); } };
+    static amx::page_alloc::Allocation alloc(size_t n) {
+        return amx::page_alloc::allocate_huge_page(n * sizeof(T));
     }
 
-    // 一组 GEMM 输入/输出缓冲(64B 对齐, 填 1)。benchmark 与 benchmark_stages 共用。
+    // 一组 GEMM 输入/输出缓冲(请求 2MB 大页)
     struct Operands {
-        std::unique_ptr<int8_t,  void(*)(void*)> A;
-        std::unique_ptr<int8_t,  void(*)(void*)> B;
-        std::unique_ptr<int32_t, void(*)(void*)> C;
+        amx::page_alloc::Allocation A;
+        amx::page_alloc::Allocation B;
+        amx::page_alloc::Allocation C;
     };
     Operands make_operands(int M, int N, int K) {
         Operands op{ alloc<int8_t>((size_t)M * K),
                      alloc<int8_t>((size_t)K * N),
                      alloc<int32_t>((size_t)M * N) };
-        init_operands(M, N, K, op.A.get(), op.B.get(), op.C.get());
+        init_operands(M, N, K,
+                      static_cast<int8_t*>(op.A.data()),
+                      static_cast<int8_t*>(op.B.data()),
+                      static_cast<int32_t*>(op.C.data()));
         return op;
     }
 
@@ -434,4 +443,3 @@ inline void test_correctness(int M, int N, int K,
     if (passed)
         std::cout << "Correctness test passed! AMX GEMM results match reference.\n";
 }
-

@@ -40,7 +40,9 @@
    或 `--dim-m 32 --dim-n 32 --dim-k 64:4096:64`(固定 MN、扫 K)。
 
    两个变体各有专属参数：`gemm-offline` 额外有 `--no-swpfA/B/C`（关软件预取）；
-   `gemm-online` 额外有 `--MC/--NC/--KC`（调 cache blocking）和 `--profile-single`（分阶段计时，额外输出 `*-stages.csv`）。
+   `gemm-online` 额外有 `--MC/--NC/--KC`（调 cache blocking）、
+   `--buffer-allocation auto|regular|huge`（控制 packed Buffer 分配策略）和
+   `--profile-single`（分阶段计时，额外输出 `*-stages.csv`）。
 
    输出日志为 **CSV**。
 

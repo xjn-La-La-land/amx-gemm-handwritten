@@ -29,7 +29,8 @@ public:
         int reps = 5;                   // 每配置计时轮数
     };
 
-    explicit Autotuner(Options opt) : opt_(std::move(opt)) {}
+    explicit Autotuner(Options opt, GEMMParams base)
+        : opt_(std::move(opt)), base_(base) {}
 
     const Options& options() const { return opt_; }
 
@@ -43,7 +44,7 @@ public:
             return it->second; // 命中缓存: 跳过整轮调优
 
         const auto cfgs = build_configs(M, N, K, A, B, C);
-        GEMMParams best = GEMMParams();
+        GEMMParams best = base_;
         double best_s = std::numeric_limits<double>::infinity();
         bool found = false;
         for (const GEMMParams &cfg : cfgs) {
@@ -59,6 +60,7 @@ public:
 
 private:
     Options opt_;
+    GEMMParams base_;
     std::map<std::array<int, 3>, GEMMParams> cache_; // (M,N,K) -> 赢家配置
 
     // 搜索空间 = 合法 (kernel, loop_order) × 各自 loop order 涉及的 blocking 网格
@@ -67,7 +69,7 @@ private:
         auto axis = [](const std::vector<int> &v, int fb) {
             return v.empty() ? std::vector<int>{fb} : v; // 空 = 用 base 单值(不扫该维)
         };
-        const GEMMParams base;
+        const GEMMParams base = base_;
         const std::vector<int> MCS = axis(opt_.mcs, base.MC);
         const std::vector<int> NCS = axis(opt_.ncs, base.NC);
         const std::vector<int> KCS = axis(opt_.kcs, base.KC);
@@ -93,7 +95,7 @@ private:
                 emit(s.kernel, s.loop_order);
         } else {
             // 固定为 heuristic 在默认 blocking 下的选择: 探测一次读回它选的 kernel+loop order
-            GEMMKernelInt8 probe(M, N, K, K, N, N, A, B, C);
+            GEMMKernelInt8 probe(M, N, K, K, N, N, A, B, C, base_);
             emit(probe.selected_kernel_ptr(), probe.loop_order());
         }
         return cfgs;

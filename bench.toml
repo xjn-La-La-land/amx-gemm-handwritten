@@ -4,6 +4,7 @@
 # 键名 = binary 的长选项名(去掉 --)。CLI 参数可临时覆盖本文件。
 
 output = "gepp-i8-1core.csv"
+buffer-allocation = "auto"  # "auto" / "regular" / "huge"
 
 # ---- bench.sh 与 binary 共享 ----
 freq  = 3000000        # kHz

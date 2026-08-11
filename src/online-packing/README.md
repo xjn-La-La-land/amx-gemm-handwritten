@@ -56,6 +56,24 @@
 >    2. 如果 N 小，那 Pack A 的收益就会小，我们就不 Pack A
 >    3. 如果 K 小，那 Unpack C 的收益就会小，我们就不 Unpack C
 
+## Packed Buffer 分配策略
+
+online kernel 可通过 `--buffer-allocation auto|regular|huge` 控制 packed Buffer：
+
+- `regular`：使用 `aligned_alloc` 分配，仅保证数据地址 64B 对齐，不主动请求 THP。
+- `huge`：建立 2MB 对齐的匿名映射并调用 `MADV_HUGEPAGE`；分配或 advice 失败时报错。
+- `auto`：当 4KB 页数超过本机一级 load DTLB 的 64 项，并且向上取整到 2MB 后的
+  内存放大不超过 4 倍时选择 huge page 路径，否则选择 regular 路径。默认 640KB 的
+  `KC×NC` block 会选择 huge page 路径，512KB 以下的 Buffer 选择 regular 路径。
+
+THP 要求底层映射包含 2MB 对齐的完整区间，但返回给 kernel 的数据指针只需保持
+64B 对齐。分配器会在 2MB 映射内部加入 cache-line 对齐的着色偏移，避免多个 Buffer
+都从相同的 L1/L2 cache set 起始。CSV 中的 `bufferAllocation` 记录生效的分配策略；
+Linux 最终是否成功建立 THP 仍需用 `/proc/<pid>/smaps` 的 `AnonHugePages` 验证。
+
+当前 `auto` 只对单线程测试启用。多线程测试会在入口处解析为 `regular`，避免每个
+block 独立持有的 Buffer 都至少消耗一个 2MB THP；显式指定 `huge` 仍可用于多线程实验。
+
 ## GEMM (large M, large N, large K)
 
 - Routine1: GEMM => GEPP => GEPB => GESB
@@ -163,4 +181,4 @@ GEMM 下 ABC 全部做 packing/unpacking，每一部分的开销变化
 
 M=N=K，对比 GEMM/GEPP/GEPB 三种实现策略的性能
 
-![img](../../pics/amx-util-vs-mnk.png) 
+![img](../../pics/amx-util-vs-mnk.png)
