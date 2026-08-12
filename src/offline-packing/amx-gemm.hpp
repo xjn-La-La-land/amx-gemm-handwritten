@@ -120,8 +120,8 @@ public:
     #define B0  6
     #define B1  7
     // cache blocking sizes
-    static constexpr int TM = 1024;
-    static constexpr int TN = 1024;
+    static constexpr int TM = 512;
+    static constexpr int TN = 512;
     static constexpr int TK = 1280;
 
     GEMMKernelInt8(int M, int N, int K,

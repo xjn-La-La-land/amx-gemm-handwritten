@@ -21,7 +21,7 @@
    `````
    AMX GEMM Performance Test
    Usage: ./build/gemm-<variant> [OPTIONS]
-   
+
    Options:
      -h,--help                   Print this help message and exit
      --config TEXT               从 TOML/INI 文件读取选项(CLI 可覆盖文件)
@@ -46,7 +46,7 @@
 
    输出日志为 **CSV**。
 
-3. 跑测试统一用 `scripts/bench.sh`（它负责锁频 + 绑核 + perf，并用 trap 保证测试结束/中断/失败后频率一定被解锁）。
+3. 跑测试统一用 `scripts/bench.sh`（它负责锁频 + 绑核 + perf，并用 trap 保证测试结束/中断/失败后恢复系统状态）。
 
    **关注点分离**：所有实验参数（freq/cores/dim/pack/MC…）写在一份 **TOML** 里，binary 与 bench.sh 共享；
    bench.sh 自己的 CLI 只留编排项（选变体/模式/perf 事件）。参考模板 [bench.toml](bench.toml)。
@@ -54,7 +54,7 @@
    `````bash
    # 编辑 bench.toml 设定 freq / cores / round / dim-* 等，然后:
    scripts/bench.sh -v online  --config bench.toml            # 按 TOML 跑
-   scripts/bench.sh -v offline --config bench.toml -m perf    # 加 perf stat
+   scripts/bench.sh -v offline --config bench.toml -m perf    # 默认严格隔离物理核
    scripts/bench.sh -v online  --config bench.toml --dry-run  # 只预览命令
    scripts/bench.sh -v online  --config bench.toml -- -r 5    # -- 后临时覆盖 binary 参数
    `````
@@ -64,19 +64,35 @@
    ```
    用法:
    scripts/bench.sh -v <offline|online> --config <toml> [选项] [-- <透传给 gemm 的额外参数>]
-   
+
    选项:
    -v, --variant   offline | online             (必需: 选哪个可执行文件)
        --config    实验参数 TOML 文件             (必需)
    -m, --mode      run | perf                   (默认 run; perf 挂 perf stat)
        --build-dir CMake 构建目录                (默认 build)
        --no-lock   不锁定系统频率
-       --no-sudo   binary 不加 sudo(则无法关硬件预取器/读 MSR)
        --dry-run   只打印将执行的命令, 不实际运行
    -h, --help
    ```
 
    频率的单独锁定/解锁也可直接用 `scripts/freq.sh lock <khz>` 和 `scripts/freq.sh unlock`（底层是 **cpupower**）。
+
+   `cores` 模式默认使用 cgroup v2 isolated partition，暂停 `irqbalance`、迁移 IRQ，并临时 offline
+   未选中的 SMT sibling；trap 会在测试结束后恢复。运行前可查看目标物理核和 housekeeping CPU：
+
+   ```bash
+   scripts/cpu-isolation.py plan 15
+   ```
+
+   由内核或驱动管理且无法在运行时迁移的 IRQ 会打印 warning 后跳过，因此仍可能产生少量中断干扰。
+
+   若 benchmark 被 `SIGKILL` 导致 trap 无法执行，可手动恢复：
+
+   ```bash
+   sudo scripts/cpu-isolation.py release
+   ```
+
+   `release` 会恢复 cpuset partition、IRQ affinity、irqbalance 和 SMT online 状态。
 
 ## Perf events 分析
 

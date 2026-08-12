@@ -1,17 +1,16 @@
 # AMX GEMM 实验参数模板。用法:
 #   scripts/bench.sh -v online --config bench.toml
-# binary 直接读本文件(--config); bench.sh 也从这里读 freq(锁频)与 cores/node(绑核)。
+# binary 直接读本文件(--config); bench.sh 也从这里读 freq(锁频)与 cores(绑核)。
 # 键名 = binary 的长选项名(去掉 --)。CLI 参数可临时覆盖本文件。
 
-output = "gepp-i8-1core.csv"
+output = "gepb-i8-1core.csv"
 buffer-allocation = "auto"  # "auto" / "regular" / "huge"
 
 # ---- bench.sh 与 binary 共享 ----
 freq  = 3000000        # kHz
 
 # ---- bench.sh 专属(binary 靠 allow_config_extras 忽略这些键)----
-cores = "0"            # 核规格, 支持 "0" / "0,1,2" / "0-15"; bench.sh 展开后转发给 binary
-# node = 2             # (可选) NUMA 节点数; 取消注释则走 numactl, 忽略 cores
+cores = "15"           # 核规格, 支持 "0" / "0,1,2" / "0-15"; bench.sh 展开后转发给 binary
 
 # perf 事件(数组, 不用重复写 -e)。仅 `-m perf` 时用。
 events = ["cycles", "instructions", "MEM_LOAD_RETIRED.L1_HIT", "MEM_LOAD_RETIRED.L1_MISS"]
@@ -20,11 +19,10 @@ events = ["cycles", "instructions", "MEM_LOAD_RETIRED.L1_HIT", "MEM_LOAD_RETIRED
 # ---- binary 实验参数 ----
 round = 100            # 计时循环次数
 # no-hwpf = true       # 关闭硬件预取器(默认开启)
-# no-packA = true      # 关掉 A 的 packing(B/C 同理)
 
 # 尺寸 sweep: 标量或 "start:end:step"(含端点)。三维 zip, 标量重复对齐最长维。
 dim-m = "512:16384:256"
-dim-n = "512:16384:256"
+dim-n = "512"
 dim-k = "1280"
 
 # ---- online 专属(cache blocking)----
@@ -33,11 +31,11 @@ NC = 512
 KC = 1280
 
 # ---- online 专属(autotune; 单核, 每 shape 经验式挑最快配置)----
-autotune = true                 # 开启(默认关; 关闭时走 heuristic, 结果与旧版一致)
+autotune = false                 # 开启(默认关; 关闭时走 heuristic, 结果与旧版一致)
 no-autotune-kernel = false       # 只调 blocking, kernel/loop_order 固定为 heuristic(默认连 kernel 一起调)
-# autotune-mc = [256, 512, 1024]  # MC 候选
-# autotune-nc = [256, 512, 1024]  # NC 候选
-autotune-kc = [1024, 1280, 1536] # KC 候选
+# autotune-mc = [256, 384, 512, 768]  # MC 候选
+# autotune-nc = [256, 384, 512, 768]  # NC 候选
+# autotune-kc = [1024, 1280, 1536] # KC 候选
 autotune-reps = 7               # 每候选计时轮数(默认 5)
 
 # ---- offline 专属(软件预取; 取消注释以关闭)----

@@ -383,7 +383,7 @@ void Kernel::amx_gemm_core_packAB_v1_template(taskSize *task) {
 
         if constexpr (SWPF_A) {
             const int8_t *next_A_ptr = task->A + (i + M_STEP) * task->K; // prefetch next 32×TK blockA
-            swpf_ctx_A.init(M_STEP * task->K, 2, next_A_ptr, _MM_HINT_T0);
+            swpf_ctx_A.init(M_STEP * task->K, 2, next_A_ptr);
             swpf_ctx_A.set_on(i + M_STEP < task->M);
         }
         for (int j = 0; j < task->N; j += N_STEP) {
@@ -464,7 +464,7 @@ void Kernel::amx_gemm_core_packAB_v2_template(taskSize *task) {
 
     if constexpr (SWPF_A) {
         const int8_t *next_A_ptr = task->A + task->M * task->K; // prefetch next TM×TK blockA
-        swpf_ctx_A.init(task->M * task->K, 2, next_A_ptr, _MM_HINT_T0);
+        swpf_ctx_A.init(task->M * task->K, 2, next_A_ptr);
     }
     for (int j = 0; j < task->N; j += N_STEP) {
         A_ptr = task->A;
@@ -554,7 +554,7 @@ void Kernel::amx_gemm_core_packABC_v1_template(taskSize *task) {
     if constexpr (SWPF_B) {
         const int8_t *next_B_ptr = task->B + task->N * task->K; // prefetch next TN×TK blockB
         const size_t size = task->N * task->K * sizeof(int8_t);
-        swpf_ctx_B.init(size, 2, next_B_ptr, _MM_HINT_T1);
+        swpf_ctx_B.init(size, 2, next_B_ptr);
     }
     for (int i = 0; i < task->M; i += M_STEP) {
         B_ptr = task->B;
@@ -562,7 +562,7 @@ void Kernel::amx_gemm_core_packABC_v1_template(taskSize *task) {
         if constexpr (SWPF_A) {
             const int8_t *next_A_ptr = task->A + (i + M_STEP) * task->K; // prefetch next 32×TK blockA
             const size_t size = M_STEP * task->K * sizeof(int8_t);
-            swpf_ctx_A.init(size, 2, next_A_ptr, _MM_HINT_T0);
+            swpf_ctx_A.init(size, 2, next_A_ptr);
             // swpf_ctx_A.set_on(i + M_STEP < task->M);
         }
         for (int j = 0; j < task->N; j += N_STEP) {
@@ -571,7 +571,7 @@ void Kernel::amx_gemm_core_packABC_v1_template(taskSize *task) {
 
             if constexpr (SWPF_C) {
                 const int8_t *next_C_ptr = reinterpret_cast<const int8_t*>(C_ptr + M_STEP * N_STEP);
-                swpf_ctx_C.init(M_STEP * N_STEP * sizeof(int32_t), 4, next_C_ptr, _MM_HINT_T1);
+                swpf_ctx_C.init(M_STEP * N_STEP * sizeof(int32_t), 4, next_C_ptr, _MM_HINT_T0);
                 // swpf_ctx_C.set_on(!((i + M_STEP == task->M) && (j + N_STEP == task->N))); // not last block
             }
 
@@ -643,7 +643,7 @@ void Kernel::amx_gemm_core_packABC_v2_template(taskSize *task) {
 
     if constexpr (SWPF_A) {
         const int8_t *next_A_ptr = task->A + task->M * task->K; // prefetch next TM×TK blockA
-        swpf_ctx_A.init(task->M * task->K, 2, next_A_ptr, _MM_HINT_T0);
+        swpf_ctx_A.init(task->M * task->K, 2, next_A_ptr);
          // swpf_ctx_A.set_on(i + M_STEP < task->M);
     }
     for (int j = 0; j < task->N; j += N_STEP) {
@@ -812,8 +812,8 @@ void Kernel::amx_gemm_blocking() {
 
 
 void Kernel::amx_gemm_compute() {
-    // amx_gemm_blocking(); // launch AMX GEMM with L2 blocking
-    amx_gemm_core_pure_loop();
+    amx_gemm_blocking(); // launch AMX GEMM with L2 blocking
+    // amx_gemm_core_pure_loop();
 }
 
 

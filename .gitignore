@@ -3,6 +3,9 @@ build
 *.csv
 !CMakeLists.txt
 compile_commands.json
+__pycache__/
+*.py[cod]
+bench-offline.toml
 
 # 生成的绘图产物(plot_*.py 输出到脚本旁 / cwd)
 tools/*.png

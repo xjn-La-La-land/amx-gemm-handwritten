@@ -15,6 +15,8 @@
 
 #include "utils.hpp"
 #include "thread_params.hpp"
+#include "buffer.hpp"   // Buffer / View / Role / Layout / make_view
+#include "packing.hpp"  // pack_from / unpack_to + tile 原语 + tile 常量
 
 #if (defined(_WIN32) || defined(_WIN64))
 #define RESTRICT __restrict
@@ -29,9 +31,6 @@
 #else
 #define ALWAYS_INLINE inline
 #endif
-
-#include "buffer.hpp"   // Buffer / View / Role / Layout / make_view
-#include "packing.hpp"  // pack_from / unpack_to + tile 原语 + tile 常量
 
 namespace amx {
 
@@ -302,8 +301,8 @@ private:
     // 选中的 routine 行(kernel / loop_order / name / pack 全从这里派生), 指向 kernel_specs() 静态表。
     const KernelSpec* selected_spec_ = nullptr;
 
-    // data relayout for whole matrix A, B, C
-    Buffer<int8_t>  bufA;   // 纯存储;shape/stride/role 由 make_view 在使用点赋予
+    // data buffers for matrix A, B, C
+    Buffer<int8_t>  bufA;
     Buffer<int8_t>  bufB;
     Buffer<int32_t> bufC;
 

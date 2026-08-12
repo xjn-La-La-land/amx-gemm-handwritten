@@ -44,9 +44,10 @@ handwritten-v2/
 │       └── README.md           # GEMM 分类学详解（GEBP/GEPB/GEPM… + Goto 论文框架）
 ├── scripts/                # 编排层（跑测试用，不含 build）
 │   ├── bench.sh            # 统一入口：--config 读 TOML，锁频+绑核+perf，trap 保证解锁
+│   ├── cpu-isolation.py    # cgroup v2/IRQ/SMT 严格隔离，运行后恢复
 │   ├── freq.sh             # 频率 lock/unlock
-│   ├── corelist.sh         # 核规格展开/计数
-│   └── toml_get.py         # 从 TOML 取键(供 bench.sh 读 freq/cores/node)
+│   ├── corelist.py         # CPU 列表解析/展开
+│   └── toml_get.py         # 从 TOML 取键(供 bench.sh 读 freq/cores/events/output)
 └── tools/                  # 分析绘图脚本
     ├── plot_amx_util.py        # AMX 利用率 vs MNK
     ├── plot_stage_breakdown.py # pack/compute/unpack 各阶段开销占比
@@ -117,22 +118,22 @@ cmake --build build -j       # 编译两个变体
 #   产物: build/gemm-offline, build/gemm-online
 
 # --- 跑测试（scripts/bench.sh 是统一入口）---
-scripts/bench.sh -v online  -c 0     -f 3000000 -r 1000   # 单核 run
-scripts/bench.sh -v offline -m perf  -c 0-15              # 16 核 + perf stat
-scripts/bench.sh -v online  -n 2                          # 2 NUMA 节点（numactl）
-scripts/bench.sh -v online  -c 0 --dry-run -- --MC 256    # 预览命令 / -- 后透传给 gemm
+scripts/bench.sh -v online --config bench.toml
+scripts/bench.sh -v offline --config bench.toml -m perf
+scripts/bench.sh -v online --config bench.toml --dry-run
 ```
 
 **关注点分离**：实验参数(freq/cores/dim/pack/MC…)集中在一份 **TOML**([bench.toml](bench.toml))，
-binary 经 `--config` 直读，bench.sh 也从同一 TOML 读 freq(锁频)/cores/node(绑核)。
+binary 经 `--config` 直读，bench.sh 也从同一 TOML 读 freq(锁频)/cores(绑核)。
 bench.sh 的 CLI 只留编排项。freq 单一数据源在 TOML；cores 支持 `"0-7"`(bench.sh 展开后转发
 `--core-list` 给 binary，binary 靠 `allow_config_extras` 忽略 `cores` 键)。
 
-`scripts/` 四件套：
+`scripts/` 五件套：
 - `bench.sh`：编排入口。`-v offline|online` 选变体，`--config <toml>`(必需)，`-m run|perf`，
-  `--no-lock`/`--no-sudo`/`--dry-run`。perf 事件从 TOML `events` 读。**用 trap 保证频率一定被解锁**。
+  `--no-lock`/`--dry-run`。perf 事件从 TOML `events` 读。**用 trap 保证频率与 CPU 隔离一定恢复**。
+- `cpu-isolation.py`：为 `cores` 所在物理核建立 isolated partition，迁移 IRQ、offline SMT sibling，结束后恢复。
 - `freq.sh`：`lock <khz>`/`unlock`，恢复范围用 `FREQ_RESTORE_MIN/MAX/GOV` 覆盖（实验机专属）。
-- `corelist.sh`：`expand`/`count`，把 `0-3,8` 展开成核列表。
+- `corelist.py`：统一解析 CPU 列表，并把 `0-3,8` 展开成核列表。
 - `toml_get.py`：从 TOML 取顶层键(数组转逗号分隔)，供 bench.sh 读编排参数(用 `tomllib`)。
 
 CLI/config 参数（全部可写进 `--config` TOML/INI）。注册按"谁消费谁注册"划分：
@@ -168,8 +169,7 @@ harness 消费的项集中在 `BenchConfig`（`PerformanceTester::cfg`），解�
 - **内存对齐**：所有矩阵 buffer 64B (cacheline) 对齐；packed buffer 用 `MIN_STRIDE=64` 做 dense stride。
 - **锁频后必须解锁**：`bench.sh` 用 trap 保证解锁；若直接调 `freq.sh lock`，务必配对 `freq.sh unlock`，
   否则 CPU 停在固定频率。`PerformanceTester` 析构时会自动重开被禁用的硬件预取器。
-- **需要权限**：跑测试用 `sudo`（perf、MSR 读写、cpupower 都要 root）；`bench.sh` 默认加 sudo，
-  可用 `--no-sudo` 关（关了就无法禁用硬件预取器）。
+- **需要权限**：跑测试用 `sudo`（CPU 隔离、perf、MSR 读写、cpupower 都需要 root）。
 - **`.gitignore`**：`build/`、`*.txt`（日志/结果）、`compile_commands.json` 不入库；`pics/*.png` 走 git-lfs。
 
 ## 代码风格
@@ -186,4 +186,3 @@ harness 消费的项集中在 `BenchConfig`（`PerformanceTester::cfg`），解�
 - **Panel / Block / Strip**：按 cache/register block size 对大矩阵的三级切分。
 - **KPACK / VNNI**：AMX int8 要求 B 在 K 方向按 4 个 int8 交织（`KPACK_b8=4`）。
 - **swpf**：software prefetch；**hwpf**：hardware prefetcher。
-

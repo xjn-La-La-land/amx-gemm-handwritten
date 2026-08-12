@@ -629,14 +629,17 @@ void Kernel::GEPB_kernel_impl_denseAB_stridedC(View<int8_t> panelA,
                                                 View<int32_t> panelC,
                                                 const int8_t *originA) {
 
-    SWPFHelper swpf_ctx_a(MR * panelA.cols() * sizeof(int8_t),
-                                                2,          // step
-                                                _MM_HINT_T1 // hint: prefetch to L2
+    SWPFHelper swpf_ctx_a(
+        MR * panelA.cols() * sizeof(int8_t),
+        2,          // step
+        _MM_HINT_T1 // hint: prefetch to L2
     );
-    SWPFHelper swpf_ctx_c(MR * NR * sizeof(int32_t),
-                                                4, // step
-                                                NR * sizeof(int32_t), panelC.row_stride() * sizeof(int32_t),
-                                                _MM_HINT_T0 // hint: prefetch to L1
+    SWPFHelper swpf_ctx_c(
+        MR * NR * sizeof(int32_t),
+        4, // step
+        NR * sizeof(int32_t),
+        panelC.row_stride() * sizeof(int32_t),
+        _MM_HINT_ET0 // hint: prefetch to L1
     );
 
     for (int i = 0; i < panelA.rows(); i += MR) {

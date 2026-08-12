@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# bench.sh —— AMX GEMM 基准测试编排(取代原 Makefile 的 run/perf/run-N-node)。
+# bench.sh —— AMX GEMM 基准测试编排(取代原 Makefile 的 run/perf)。
 #
-# 用 trap 保证无论测试成功、失败还是被 Ctrl-C 中断, 频率一定被解锁
+# 用 trap 保证无论测试成功、失败还是被 Ctrl-C 中断, 频率和 CPU 隔离都会恢复
 #
 # 用法:
 #   scripts/bench.sh -v <offline|online> --config <toml> [选项] [-- <透传给 gemm 的额外参数>]
@@ -12,14 +12,12 @@
 #   -m, --mode      run | perf                   (默认 run; perf 挂 perf stat)
 #       --build-dir CMake 构建目录                (默认 build)
 #       --no-lock   不锁定系统频率
-#       --no-sudo   binary 不加 sudo(则无法关硬件预取器/读 MSR)
 #       --dry-run   只打印将执行的命令, 不实际运行
 #   -h, --help
 #
 # TOML 里 bench.sh 关心的键:
 #   freq  = 3000000       # kHz, 用于锁频(与 binary 算利用率的分母同源)
 #   cores  = "0-7"        # 核规格, 支持 0 / 0,1,2 / 0-15; taskset 模式用
-#   node   = 2            # (可选) NUMA 节点数; 设置后走 numactl, 忽略 cores
 #   events = ["cycles", "instructions", ...]   # (可选) perf 事件数组; 缺省用内置默认
 #
 # 示例:
@@ -30,8 +28,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=corelist.sh
-source "$SCRIPT_DIR/corelist.sh"
 # shellcheck source=freq.sh
 source "$SCRIPT_DIR/freq.sh"
 
@@ -103,7 +99,6 @@ CONFIG=""
 MODE="run"
 BUILD_DIR="build"
 NO_LOCK=0
-NO_SUDO=0
 DRY_RUN=0
 
 # 打印文件顶部紧邻 shebang 的注释块作为帮助信息:
@@ -127,7 +122,6 @@ while [[ $# -gt 0 ]]; do
         -m|--mode)     MODE="${2:?}"; shift 2 ;;
         --build-dir)   BUILD_DIR="${2:?}"; shift 2 ;;
         --no-lock)     NO_LOCK=1; shift ;;
-        --no-sudo)     NO_SUDO=1; shift ;;
         --dry-run)     DRY_RUN=1; shift ;;
         -h|--help)     usage; exit 0 ;;
         --)            shift; EXTRA_ARGS=("$@"); break ;;
@@ -152,16 +146,13 @@ esac
 # 从 TOML 读 bench.sh 关心的编排参数
 FREQ="$(toml_get freq)"
 CORES="$(toml_get cores)"
-NUMA_NODES="$(toml_get node)"
 
 # 锁频需要 freq(除非 --no-lock)
 if (( ! NO_LOCK )) && [[ -z "$FREQ" ]]; then
     die "config '$CONFIG' 缺 freq(锁频需要); 或用 --no-lock 跳过锁频"
 fi
-# taskset 模式需要 cores
-if [[ -z "$NUMA_NODES" && -z "$CORES" ]]; then
-    die "config '$CONFIG' 需提供 cores(如 cores = \"0-7\") 或 node"
-fi
+# 严格隔离按显式 CPU 列表工作，不猜测 NUMA node 中该选哪一个 SMT thread。
+[[ -n "$CORES" ]] || die "config '$CONFIG' 需提供 cores(如 cores = \"0-7\")"
 
 # 解析 perf 事件为 -e 参数数组: TOML events 数组, 缺则回落 DEFAULT_EVENTS。
 declare -a PERF_EVENTS=()
@@ -183,30 +174,19 @@ run_cmd() {
 do_lock()   { (( NO_LOCK )) && return 0; run_cmd freq_lock "$FREQ"; }
 do_unlock() { (( NO_LOCK )) && return 0; run_cmd freq_unlock; }
 
-SUDO="sudo"
-(( NO_SUDO )) && SUDO=""
-
 # ---------------------------------------------------------------------------
 # 组装 binary 调用命令(数组形式, 避免 word-splitting/注入)
 # ---------------------------------------------------------------------------
 # binary 从 --config 读全套实验参数(round/dim/pack/MC…); bench.sh 只额外转发
 # 绑核相关(核列表需展开成 int; binary 的 CLI 覆盖 TOML)。
 GEMM_ARGS=(--config "$CONFIG")
-declare -a LAUNCH=()   # binary 前缀(taskset / numactl)
+declare -a LAUNCH=()   # binary 前缀(taskset)
 declare -a WRAP=()     # perf 包装
 
-if [[ -n "$NUMA_NODES" ]]; then
-    # NUMA 模式: numactl 绑定 node 0..N-1, binary 用 --node 自查核列表
-    (( DRY_RUN )) || command -v numactl >/dev/null || die "numactl not found (needed for node mode)"
-    nodes="$(corelist_expand "0-$((NUMA_NODES - 1))")"
-    LAUNCH=(numactl --cpunodebind="$nodes" --membind="$nodes")
-    GEMM_ARGS+=(--node "$NUMA_NODES")
-else
-    # 核心模式: cores(支持 0-7)展开成 0,1,..,7; taskset 用原规格, binary 用展开列表
-    core_list="$(corelist_expand "$CORES")"
-    LAUNCH=(taskset -c "$CORES")
-    GEMM_ARGS+=(--core-list "$core_list")
-fi
+# cores(支持 0-7)展开成 0,1,..,7; taskset 用原规格, binary 用展开列表。
+core_list="$(python3 "$SCRIPT_DIR/corelist.py" "$CORES")"
+LAUNCH=(taskset -c "$CORES")
+GEMM_ARGS+=(--core-list "$core_list")
 
 if [[ "$MODE" == perf ]]; then
     WRAP=(perf stat "${PERF_EVENTS[@]}")
@@ -215,19 +195,61 @@ fi
 EXTRA_ARGS=("${EXTRA_ARGS[@]:-}")
 [[ -z "${EXTRA_ARGS[0]:-}" ]] && EXTRA_ARGS=()
 
-# 最终命令: <launch> [sudo] [perf stat ...] <bin> <gemm-args> [extra]
-CMD=("${LAUNCH[@]}")
-[[ -n "$SUDO" ]] && CMD+=("$SUDO")
-CMD+=("${WRAP[@]}" "$BIN" "${GEMM_ARGS[@]}" "${EXTRA_ARGS[@]}")
+# binary 由 sudo 启动时，首次创建的日志会归 root。先由当前用户创建最终
+# output 文件，让 root 进程只负责追加，并在旧日志不可写时尽早报错。
+OUTPUT_PATH="$(toml_get output)"
+for ((i = 0; i < ${#EXTRA_ARGS[@]}; ++i)); do
+    case "${EXTRA_ARGS[i]}" in
+        -o|--output)
+            ((i + 1 < ${#EXTRA_ARGS[@]})) || die "${EXTRA_ARGS[i]} requires a path"
+            OUTPUT_PATH="${EXTRA_ARGS[++i]}"
+            ;;
+        --output=*) OUTPUT_PATH="${EXTRA_ARGS[i]#--output=}" ;;
+        -o?*)       OUTPUT_PATH="${EXTRA_ARGS[i]#-o}" ;;
+    esac
+done
+if [[ -n "$OUTPUT_PATH" ]]; then
+    OUTPUT_DIR="${OUTPUT_PATH%/*}"
+    [[ "$OUTPUT_DIR" == "$OUTPUT_PATH" ]] && OUTPUT_DIR="."
+    [[ -d "$OUTPUT_DIR" ]] || die "output directory not found: $OUTPUT_DIR"
+    run_cmd touch -- "$OUTPUT_PATH"
+fi
+
+# 把完整 taskset/perf/binary 命令放进 acquire 已建立的 isolated slice。
+CMD=(sudo systemd-run --scope --quiet --slice=benchmark.slice)
+CMD+=("${LAUNCH[@]}" "${WRAP[@]}" "$BIN" "${GEMM_ARGS[@]}" "${EXTRA_ARGS[@]}")
 
 # ---------------------------------------------------------------------------
-# 执行: 锁频 → (trap 保证解锁) → 跑测试
+# 执行: 隔离 → 锁频 → 跑测试 → trap 逆序恢复
 # ---------------------------------------------------------------------------
 echo "== AMX GEMM bench: variant=$VARIANT mode=$MODE ==" >&2
-do_lock
-trap 'ec=$?; do_unlock; exit $ec' EXIT INT TERM
+
+ISOLATION_ACTIVE=0
+LOCK_ACTIVE=0
+cleanup() {
+    local ec=$? cleanup_ec=0
+    trap - EXIT INT TERM
+    set +e
+    if (( LOCK_ACTIVE )); then
+        do_unlock || cleanup_ec=$?
+    fi
+    if (( ISOLATION_ACTIVE )); then
+        run_cmd sudo "$SCRIPT_DIR/cpu-isolation.py" release || cleanup_ec=$?
+    fi
+    (( ec == 0 && cleanup_ec != 0 )) && ec=$cleanup_ec
+    exit "$ec"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+run_cmd sudo "$SCRIPT_DIR/cpu-isolation.py" acquire "$CORES"
+ISOLATION_ACTIVE=1
+if (( ! NO_LOCK )); then
+    LOCK_ACTIVE=1
+    do_lock
+fi
 
 run_cmd "${CMD[@]}"
 
-# 正常路径解锁由 EXIT trap 统一处理
-
+# 正常路径的解锁与隔离释放由 EXIT trap 统一处理

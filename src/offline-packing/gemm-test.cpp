@@ -3,9 +3,10 @@
 
 using namespace amx;
 
-// offline 自定义日志列: 记录 pack 开关(全局, 由 --no-pack* 决定)。随 GEMMPlan.info 传出。
+// offline 自定义日志列: 记录 pack/swpf 开关。随 GEMMPlan.info 传出。
 struct PackLogInfo {
     bool packA, packB, packC;
+    bool swpfA, swpfB, swpfC;
 };
 
 static GEMMPlanner make_planner(const GEMMParams& params,
@@ -14,7 +15,8 @@ static GEMMPlanner make_planner(const GEMMParams& params,
                                     const int8_t* A, const int8_t* B,
                                     int32_t* C) -> GEMMPlan {
         auto info = std::make_shared<PackLogInfo>(
-            PackLogInfo{params.packA, params.packB, params.packC});
+            PackLogInfo{params.packA, params.packB, params.packC,
+                        params.swpfA, params.swpfB, params.swpfC});
         if (thread_params.core_list.size() == 1) {
             auto kernel = std::make_shared<GEMMKernelInt8>(
                 M, N, K, K, N, N, A, B, C, params);
@@ -35,12 +37,13 @@ int main(int argc, char** argv) {
     GEMMParams params;
 
     PerformanceTester tester;
-    // 注册自定义日志列: pack 开关(需在 configure() 前设置, 表头在那里写)
-    tester.info_columns = "packA,packB,packC";
+    // 注册自定义日志列(需在 configure() 前设置, 表头在那里写)
+    tester.info_columns = "packA,packB,packC,swpfA,swpfB,swpfC";
     tester.info_serialize = [](const std::shared_ptr<void>& p) -> std::string {
         const auto* i = static_cast<const PackLogInfo*>(p.get());
         return std::to_string(i->packA) + "," + std::to_string(i->packB) + "," +
-               std::to_string(i->packC);
+               std::to_string(i->packC) + "," + std::to_string(i->swpfA) + "," +
+               std::to_string(i->swpfB) + "," + std::to_string(i->swpfC);
     };
     // offline 默认: 固定 32x32, K 从 64 扫到 4096(可用 --dim-* / --config 覆盖)
     tester.cfg.dim_m = "32";

@@ -154,7 +154,7 @@ inline OperandInit fill_const(int8_t a = 1, int8_t b = 1, int32_t c = 1) {
     };
 }
 
-// 默认: A=B=C=1(与历史行为一致)
+// 默认: A=B=C=1
 inline void fill_ones(int M, int N, int K, int8_t* A, int8_t* B, int32_t* C) {
     fill_const(1, 1, 1)(M, N, K, A, B, C);
 }
